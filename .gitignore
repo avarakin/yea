@@ -4,3 +4,4 @@ __pycache__/
 .yaourt/
 ~*.pkg.tar.zst
 ~*.deb
+commands.log
