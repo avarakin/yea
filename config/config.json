@@ -1,0 +1,8 @@
+{
+    "api_url": "http://localhost:8080/v1/chat/completions",
+    "api_model": "llama3",
+    "api_key": "",
+    "cache_dir": "~/.cache/yea",
+    "prompt_template_path": "config/security_review.md",
+    "vulnerability_check": true
+}
