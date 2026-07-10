@@ -216,6 +216,56 @@ def extract_pkgver(pkgbuild: str | None) -> str:
     return "unknown"
 
 
+def _fmt_list(val):
+    """Format a list as a comma-separated string, or return 'N/A'."""
+    return ", ".join(val) if isinstance(val, list) and val else "N/A"
+
+
+def _fmt_ts(val):
+    """Format a Unix timestamp as ISO format, or return 'N/A'."""
+    if not val:
+        return "N/A"
+    return datetime.utcfromtimestamp(val).isoformat()
+
+
+def _build_metadata(aur_info: dict | None, pkgbuild: str | None, git_meta: dict) -> dict:
+    """Build the full metadata dict from AUR info, PKGBUILD, and git metadata."""
+    if aur_info:
+        metadata = {
+            "Version": extract_pkgver(pkgbuild),
+            "Description": aur_info.get("Description", ""),
+            "aur_maintainer": aur_info.get("Maintainer") or "N/A",
+            "aur_submitter": aur_info.get("Submitter") or "N/A",
+            "aur_co_maintainers": _fmt_list(aur_info.get("CoMaintainers", [])),
+            "aur_license": _fmt_list(aur_info.get("License", [])),
+            "aur_url": aur_info.get("URL") or "N/A",
+            "aur_depends": _fmt_list(aur_info.get("Depends", [])),
+            "aur_makedepends": _fmt_list(aur_info.get("MakeDepends", [])),
+            "aur_num_votes": str(aur_info.get("NumVotes", "N/A")),
+            "aur_popularity": str(aur_info.get("Popularity", "N/A")),
+            "aur_first_submitted": _fmt_ts(aur_info.get("FirstSubmitted")),
+            "aur_last_modified": _fmt_ts(aur_info.get("LastModified")),
+        }
+    else:
+        metadata = {
+            "Version": extract_pkgver(pkgbuild),
+            "Description": "",
+            "aur_maintainer": "N/A",
+            "aur_submitter": "N/A",
+            "aur_co_maintainers": "N/A",
+            "aur_license": "N/A",
+            "aur_url": "N/A",
+            "aur_depends": "N/A",
+            "aur_makedepends": "N/A",
+            "aur_num_votes": "N/A",
+            "aur_popularity": "N/A",
+            "aur_first_submitted": "N/A",
+            "aur_last_modified": "N/A",
+        }
+    metadata.update(git_meta)
+    return metadata
+
+
 # ─── AUR API ─────────────────────────────────────────────────────────────────
 
 AUR_BASE = "https://aur.archlinux.org/rpc?v=5"
@@ -777,100 +827,14 @@ def draw_review_log_viewer(stdscr, log: list[tuple[str, str]]) -> None:
 # ─── TUI Screens ─────────────────────────────────────────────────────────────
 
 
-def screen_upgrade_list(stdscr, packages: list[str]) -> list[str]:
-    """Show checkbox list of installed AUR packages for upgrade."""
-    curses.curs_set(0)
-    stdscr.clear()
-    stdscr.nodelay(False)
-
-    focused_idx = 0
-    scroll_offset = 0
-    checked = {pkg: False for pkg in packages}  # All unchecked by default
-
-    while True:
-        stdscr.clear()
-        max_y, max_x = stdscr.getmaxyx()
-
-        draw_header(stdscr, 0, "Upgrade AUR Packages")
-
-        # Info
-        draw_line(
-            stdscr,
-            4,
-            2,
-            f"Found {len(packages)} AUR packages installed.",
-        )
-        draw_line(
-            stdscr,
-            5,
-            2,
-            "Select packages to upgrade, then press Enter.",
-        )
-
-        # Draw package list
-        start_y = 7
-        visible = max_y - start_y - 3
-        visible = max(visible, 1)
-
-        # Adjust scroll offset to keep focused item visible
-        if focused_idx < scroll_offset:
-            scroll_offset = focused_idx
-        elif focused_idx >= scroll_offset + visible:
-            scroll_offset = focused_idx - visible + 1
-
-        for i in range(visible):
-            pkg_idx = scroll_offset + i
-            if pkg_idx >= len(packages):
-                break
-            pkg = packages[pkg_idx]
-            screen_y = start_y + i
-            draw_checkbox(
-                stdscr,
-                screen_y,
-                2,
-                checked.get(pkg, False),
-                pkg,
-                focused_idx == pkg_idx,
-            )
-
-        draw_footer(
-            stdscr,
-            max_y - 2,
-            ["↑/↓: Navigate", "PgUp/PgDn: Page", "Space: Toggle", "Enter: Confirm", "q: Quit"],
-        )
-
-        stdscr.refresh()
-        key = stdscr.getch()
-
-        if key == curses.KEY_UP:
-            focused_idx = max(0, focused_idx - 1)
-        elif key == curses.KEY_DOWN:
-            focused_idx = min(len(packages) - 1, focused_idx + 1)
-        elif key == curses.KEY_PPAGE:  # Page Up
-            focused_idx = max(0, focused_idx - visible)
-        elif key == curses.KEY_NPAGE:  # Page Down
-            focused_idx = min(len(packages) - 1, focused_idx + visible)
-        elif key == curses.KEY_HOME:
-            focused_idx = 0
-        elif key == curses.KEY_END:
-            focused_idx = len(packages) - 1
-        elif key == ord(" "):
-            if packages:
-                checked[packages[focused_idx]] = not checked[packages[focused_idx]]
-        elif key == ord("a"):
-            checked = {pkg: True for pkg in packages}
-        elif key == ord("n"):
-            checked = {pkg: False for pkg in packages}
-        elif key == ord("q"):
-            sys.exit(0)
-        elif key in (ord("\n"), curses.KEY_ENTER):
-            selected = [pkg for pkg in packages if checked.get(pkg, False)]
-            if selected:
-                return selected
-
-
-def screen_install_list(stdscr, packages: list[str]) -> list[str]:
-    """Show list of packages to install (from CLI args)."""
+def screen_package_list(
+    stdscr,
+    packages: list[str],
+    title: str,
+    info_line_1: str,
+    info_line_2: str,
+) -> list[str]:
+    """Show a checkbox list of packages for selection."""
     curses.curs_set(0)
     stdscr.clear()
     stdscr.nodelay(False)
@@ -883,16 +847,15 @@ def screen_install_list(stdscr, packages: list[str]) -> list[str]:
         stdscr.clear()
         max_y, max_x = stdscr.getmaxyx()
 
-        draw_header(stdscr, 0, "Install AUR Packages")
+        draw_header(stdscr, 0, title)
 
-        draw_line(stdscr, 4, 2, f"Packages to install: {len(packages)}")
-        draw_line(stdscr, 5, 2, "Select packages to install, then press Enter.")
+        draw_line(stdscr, 4, 2, info_line_1)
+        draw_line(stdscr, 5, 2, info_line_2)
 
         start_y = 7
         visible = max_y - start_y - 3
         visible = max(visible, 1)
 
-        # Adjust scroll offset to keep focused item visible
         if focused_idx < scroll_offset:
             scroll_offset = focused_idx
         elif focused_idx >= scroll_offset + visible:
@@ -926,9 +889,9 @@ def screen_install_list(stdscr, packages: list[str]) -> list[str]:
             focused_idx = max(0, focused_idx - 1)
         elif key == curses.KEY_DOWN:
             focused_idx = min(len(packages) - 1, focused_idx + 1)
-        elif key == curses.KEY_PPAGE:  # Page Up
+        elif key == curses.KEY_PPAGE:
             focused_idx = max(0, focused_idx - visible)
-        elif key == curses.KEY_NPAGE:  # Page Down
+        elif key == curses.KEY_NPAGE:
             focused_idx = min(len(packages) - 1, focused_idx + visible)
         elif key == curses.KEY_HOME:
             focused_idx = 0
@@ -1255,105 +1218,68 @@ def run_upgrade_mode(stdscr, config: dict) -> None:
         stdscr.getch()
         return
 
-    # Step 1: Show upgrade list
-    selected = screen_upgrade_list(stdscr, packages)
-
+    selected = screen_package_list(
+        stdscr,
+        packages,
+        "Upgrade AUR Packages",
+        f"Found {len(packages)} AUR packages installed.",
+        "Select packages to upgrade, then press Enter.",
+    )
     if not selected:
         return
 
-    # Step 2: Fetch metadata and clone/pull repos
-    log: list[tuple[str, str]] = []
+    _run_review_and_install(selected, config, stdscr)
 
-    pkg_data = {}
-    total = len(selected)
-    for i, pkg in enumerate(selected):
-        log.append(("...", f"{pkg} — git clone/pull"))
-        clone_or_pull_repo(pkg, config["cache_dir"])
-        log[-1] = ("✓", f"{pkg} — git clone/pull")
 
-        # Get AUR metadata
-        aur_info = get_aur_pkginfo(pkg)
+def _fetch_pkg_data(pkg: str, config: dict) -> dict:
+    """Fetch all data for a single package. Returns dict with aur_info, metadata, pkgbuild, vulns."""
+    cache_dir = config["cache_dir"]
+    clone_or_pull_repo(pkg, cache_dir)
+    aur_info = get_aur_pkginfo(pkg)
+    git_meta = get_repo_metadata(pkg, cache_dir)
+    pkgbuild = fetch_pkgbuild(pkg, cache_dir)
+    metadata = _build_metadata(aur_info, pkgbuild, git_meta)
+    vulns = check_vulnerabilities(pkg) if config.get("vulnerability_check", True) else []
+    return {
+        "aur_info": aur_info,
+        "metadata": metadata,
+        "pkgbuild": pkgbuild,
+        "vulns": vulns,
+    }
 
-        # Clone or pull repo
-        clone_or_pull_repo(pkg, config["cache_dir"])
 
-        # Get git metadata
-        git_meta = get_repo_metadata(pkg, config["cache_dir"])
+def _run_review_and_install(
+    selected: list[str],
+    config: dict,
+    stdscr,
+    pkg_data: dict[str, dict] | None = None,
+) -> None:
+    """Shared flow: vulnerability alerts, AI review, per-package review, confirmation, install."""
+    # Fetch metadata if not pre-fetched
+    if pkg_data is None:
+        pkg_data = {}
+        log: list[tuple[str, str]] = []
+        for i, pkg in enumerate(selected):
+            log.append(("...", f"{pkg} — git clone/pull"))
+            pkg_data[pkg] = _fetch_pkg_data(pkg, config)
+            log[-1] = ("✓", f"{pkg} — git clone/pull")
+            draw_progress_log(stdscr, "Fetching Package Data", log, i)
+    else:
+        log = []
 
-        # Fetch PKGBUILD
-        pkgbuild = fetch_pkgbuild(pkg, config["cache_dir"])
-
-        def _fmt_list(val):
-            return ", ".join(val) if isinstance(val, list) and val else "N/A"
-
-        def _fmt_ts(val):
-            if not val:
-                return "N/A"
-            return datetime.utcfromtimestamp(val).isoformat()
-
-        if aur_info:
-            metadata = {
-                "Version": extract_pkgver(pkgbuild),
-                "Description": aur_info.get("Description", ""),
-                "aur_maintainer": aur_info.get("Maintainer") or "N/A",
-                "aur_submitter": aur_info.get("Submitter") or "N/A",
-                "aur_co_maintainers": _fmt_list(aur_info.get("CoMaintainers", [])),
-                "aur_license": _fmt_list(aur_info.get("License", [])),
-                "aur_url": aur_info.get("URL") or "N/A",
-                "aur_depends": _fmt_list(aur_info.get("Depends", [])),
-                "aur_makedepends": _fmt_list(aur_info.get("MakeDepends", [])),
-                "aur_num_votes": str(aur_info.get("NumVotes", "N/A")),
-                "aur_popularity": str(aur_info.get("Popularity", "N/A")),
-                "aur_first_submitted": _fmt_ts(aur_info.get("FirstSubmitted")),
-                "aur_last_modified": _fmt_ts(aur_info.get("LastModified")),
-            }
-        else:
-            metadata = {
-                "Version": extract_pkgver(pkgbuild),
-                "Description": "",
-                "aur_maintainer": "N/A",
-                "aur_submitter": "N/A",
-                "aur_co_maintainers": "N/A",
-                "aur_license": "N/A",
-                "aur_url": "N/A",
-                "aur_depends": "N/A",
-                "aur_makedepends": "N/A",
-                "aur_num_votes": "N/A",
-                "aur_popularity": "N/A",
-                "aur_first_submitted": "N/A",
-                "aur_last_modified": "N/A",
-            }
-        metadata.update(git_meta)
-
-        # Check vulnerabilities
-        vulns = []
-        if config.get("vulnerability_check", True):
-            vulns = check_vulnerabilities(pkg)
-
-        pkg_data[pkg] = {
-            "aur_info": aur_info,
-            "metadata": metadata,
-            "pkgbuild": pkgbuild,
-            "vulns": vulns,
-        }
-
-        # Render progress log
-        draw_progress_log(stdscr, "Fetching Package Data", log, i)
-
-    # Step 3: Vulnerability checks - alert user
+    # Vulnerability checks
     for pkg in selected:
         vulns = pkg_data[pkg]["vulns"]
         if vulns:
             proceed = screen_vulnerability_alert(stdscr, pkg, vulns)
             if not proceed:
-                # Skip this package
                 selected.remove(pkg)
                 continue
 
     if not selected:
         return
 
-    # Step 4: AI Security Review for each package
+    # AI Security Review
     for i, pkg in enumerate(selected):
         log.append(("...", f"{pkg} — AI security review"))
         review = call_ai_review(
@@ -1366,10 +1292,10 @@ def run_upgrade_mode(stdscr, config: dict) -> None:
         log[-1] = ("✓", f"{pkg} — AI security review")
         draw_progress_log(stdscr, "Fetching Package Data", log, i)
 
-    # Step 5: Show complete log for user review
+    # Show complete log
     draw_review_log_viewer(stdscr, log)
 
-    # Step 6: Present review results one by one
+    # Present review results
     packages_to_install = []
     for pkg in selected:
         review = pkg_data[pkg]["review"]
@@ -1387,15 +1313,12 @@ def run_upgrade_mode(stdscr, config: dict) -> None:
     if not packages_to_install:
         return
 
-    # Step 7: Final confirmation
+    # Final confirmation
     confirmed = screen_confirmation(stdscr, packages_to_install)
 
-    # Step 8: Install
+    # Install
     for pkg in confirmed:
         install_package(stdscr, pkg, config["cache_dir"])
-
-    # Installation complete — exit and leave terminal as-is
-    return
 
 
 def run_install_mode(stdscr, config: dict, packages: list[str]) -> None:
@@ -1424,58 +1347,24 @@ def run_install_mode(stdscr, config: dict, packages: list[str]) -> None:
         stdscr.getch()
         return
 
-    # Step 1: Show install list
-    selected = screen_install_list(stdscr, valid_packages)
-
+    selected = screen_package_list(
+        stdscr,
+        valid_packages,
+        "Install AUR Packages",
+        f"Packages to install: {len(valid_packages)}",
+        "Select packages to install, then press Enter.",
+    )
     if not selected:
         return
 
-    # Step 2: Fetch metadata and clone/pull repos
-    log: list[tuple[str, str]] = []
-
+    # Pre-fetch data using already-known aur_infos
     pkg_data = {}
-    total = len(selected)
-    for i, pkg in enumerate(selected):
-        log.append(("...", f"{pkg} — git clone/pull"))
-        clone_or_pull_repo(pkg, config["cache_dir"])
-        log[-1] = ("✓", f"{pkg} — git clone/pull")
-
+    for pkg in selected:
         aur_info = aur_infos[pkg]
-
-        clone_or_pull_repo(pkg, config["cache_dir"])
         git_meta = get_repo_metadata(pkg, config["cache_dir"])
-
         pkgbuild = fetch_pkgbuild(pkg, config["cache_dir"])
-
-        def _fmt_list(val):
-            return ", ".join(val) if isinstance(val, list) and val else "N/A"
-
-        def _fmt_ts(val):
-            if not val:
-                return "N/A"
-            return datetime.utcfromtimestamp(val).isoformat()
-
-        metadata = {
-            "Version": extract_pkgver(pkgbuild),
-            "Description": aur_info.get("Description", ""),
-            "aur_maintainer": aur_info.get("Maintainer") or "N/A",
-            "aur_submitter": aur_info.get("Submitter") or "N/A",
-            "aur_co_maintainers": _fmt_list(aur_info.get("CoMaintainers", [])),
-            "aur_license": _fmt_list(aur_info.get("License", [])),
-            "aur_url": aur_info.get("URL") or "N/A",
-            "aur_depends": _fmt_list(aur_info.get("Depends", [])),
-            "aur_makedepends": _fmt_list(aur_info.get("MakeDepends", [])),
-            "aur_num_votes": str(aur_info.get("NumVotes", "N/A")),
-            "aur_popularity": str(aur_info.get("Popularity", "N/A")),
-            "aur_first_submitted": _fmt_ts(aur_info.get("FirstSubmitted")),
-            "aur_last_modified": _fmt_ts(aur_info.get("LastModified")),
-        }
-        metadata.update(git_meta)
-
-        vulns = []
-        if config.get("vulnerability_check", True):
-            vulns = check_vulnerabilities(pkg)
-
+        metadata = _build_metadata(aur_info, pkgbuild, git_meta)
+        vulns = check_vulnerabilities(pkg) if config.get("vulnerability_check", True) else []
         pkg_data[pkg] = {
             "aur_info": aur_info,
             "metadata": metadata,
@@ -1483,64 +1372,7 @@ def run_install_mode(stdscr, config: dict, packages: list[str]) -> None:
             "vulns": vulns,
         }
 
-        # Render progress log
-        draw_progress_log(stdscr, "Fetching Package Data", log, i)
-
-    # Step 3: Vulnerability checks
-    for pkg in selected:
-        vulns = pkg_data[pkg]["vulns"]
-        if vulns:
-            proceed = screen_vulnerability_alert(stdscr, pkg, vulns)
-            if not proceed:
-                selected.remove(pkg)
-                continue
-
-    if not selected:
-        return
-
-    # Step 4: AI Security Review
-    for i, pkg in enumerate(selected):
-        log.append(("...", f"{pkg} — AI security review"))
-        review = call_ai_review(
-            pkg,
-            pkg_data[pkg]["pkgbuild"] or "",
-            pkg_data[pkg]["metadata"],
-            config,
-        )
-        pkg_data[pkg]["review"] = review
-        log[-1] = ("✓", f"{pkg} — AI security review")
-        draw_progress_log(stdscr, "Fetching Package Data", log, i)
-
-    # Step 5: Show complete log for user review
-    draw_review_log_viewer(stdscr, log)
-
-    # Step 6: Present review results
-    packages_to_install = []
-    for pkg in selected:
-        review = pkg_data[pkg]["review"]
-        proceed = screen_security_review(
-            stdscr,
-            pkg,
-            pkg_data[pkg]["pkgbuild"] or "",
-            pkg_data[pkg]["metadata"],
-            pkg_data[pkg]["vulns"],
-            review,
-        )
-        if proceed:
-            packages_to_install.append(pkg)
-
-    if not packages_to_install:
-        return
-
-    # Step 7: Final confirmation
-    confirmed = screen_confirmation(stdscr, packages_to_install)
-
-    # Step 8: Install
-    for pkg in confirmed:
-        install_package(stdscr, pkg, config["cache_dir"])
-
-    # Installation complete — exit and leave terminal as-is
-    return
+    _run_review_and_install(selected, config, stdscr, pkg_data)
 
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
