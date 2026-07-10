@@ -109,7 +109,90 @@ yea/
 └── ~/.cache/yea/                   # Cloned AUR repositories
 ```
 
-## Requirements
+
+## External Communications
+
+`yea` communicates externally via HTTP(S) API calls and local subprocess invocations. Below is a complete chronological sequence of all external communications.
+
+### Startup Phase
+
+| # | Type | Target | Direction | Details |
+|---|------|--------|-----------|---------|
+| 1 | File read | `~/.config/yea/config.json` | Inbound | Loads user config. Falls back to `DEFAULT_CONFIG` if missing. |
+| 2 | File read | `config/security_review.md` | Inbound | Loads AI prompt template. Fallback inline template used if missing. |
+| 3 | Directory create | `~/.cache/yea/` | Outbound | Created automatically if it doesn't exist. |
+
+### Upgrade Mode — Package Detection
+
+| # | Type | Target | Direction | Details |
+|---|------|--------|-----------|---------|
+| 4 | Subprocess | `pacman -Qm` | Outbound (local) | Detects installed AUR packages. `PACMAN_COLOR=0` disables color output. |
+
+### Per-Package Data Fetching
+
+| # | Type | Target | Direction | Details |
+|---|------|--------|-----------|---------|
+| 5 | Subprocess | `git clone` / `git pull` | Outbound (local) | Clones or pulls the AUR git repo (`https://aur.archlinux.org/{pkgname}.git`) into `~/.cache/yea/{pkgname}/`. |
+| 6 | HTTP POST | `https://aur.archlinux.org/rpc?v=5&type=info` | Outbound | Sends package name(s) as form data. Returns JSON metadata (Name, Version, Description, OutOfDate). Timeout: 30s. |
+| 7 | Subprocess | `git log -1 --format=%cd --date=iso` | Outbound (local) | Gets last commit date. |
+| 8 | Subprocess | `git log --format=%cd --date=iso --reverse` | Outbound (local) | Gets all commit dates in reverse order. |
+| 9 | Subprocess | `git log --format=%an --reverse` | Outbound (local) | Gets all authors to detect maintainer changes. |
+| 10 | Subprocess | `git log -1 --format=%cd --date=iso <i>..HEAD` | Outbound (local) | Gets date when maintainer changed (only if multiple unique authors found). |
+| 11 | HTTP GET | `https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h={pkgname}` | Outbound | Fetches raw PKGBUILD content. Checks cache first. Timeout: 30s. Caches to `~/.cache/yea/{pkgname}/PKGBUILD`. |
+| 12 | HTTP POST | `https://aur.archlinux.org/rpc?v=5&type=info` | Outbound | Re-used for vulnerability check (OutOfDate flag). Timeout: 30s. |
+| 13 | Hardcoded list | In-memory | — | Checks against known compromised packages: `xerohdm`, `ntfy-bin`. |
+
+### AI Security Review (per package)
+
+| # | Type | Target | Direction | Details |
+|---|------|--------|-----------|---------|
+| 14 | HTTP POST | `{api_url}` (default: `http://localhost:8080/v1/chat/completions`) | Outbound | Sends JSON with `model`, `messages` (system + user prompt with PKGBUILD), `temperature: 0.1`. Headers: `Content-Type: application/json`, `Authorization: Bearer {api_key}` (if configured). Timeout: 120s. Expects JSON with `risk_score`, `rating`, `summary`, `details`. |
+
+### Package Installation (per confirmed package)
+
+| # | Type | Target | Direction | Details |
+|---|------|--------|-----------|---------|
+| 15 | Subprocess | `makepkg -si --noconfirm` | Outbound (local, requires sudo) | Builds and installs the package from the cloned repo. Exits curses mode first to free the terminal for `sudo`. |
+
+### Summary Table
+
+| # | Communication | Protocol/Method | Target | When |
+|---|--------------|-----------------|--------|------|
+| 1 | File read | Local FS | `~/.config/yea/config.json` | Startup |
+| 2 | File read | Local FS | `config/security_review.md` | Startup |
+| 3 | Directory create | Local FS | `~/.cache/yea/` | Startup |
+| 4 | Subprocess | Local | `pacman -Qm` | Upgrade mode only |
+| 5 | Subprocess | Local | `git clone` / `git pull` | Per package |
+| 6 | HTTP POST | HTTPS | `aur.archlinux.org/rpc?v=5&type=info` | Per package (metadata) |
+| 7–10 | Subprocess | Local | `git log` commands | Per package (git metadata) |
+| 11 | HTTP GET | HTTPS | `aur.archlinux.org/cgit/aur.git/plain/PKGBUILD` | Per package |
+| 12 | HTTP POST | HTTPS | `aur.archlinux.org/rpc` (re-use) | Per package (vuln check) |
+| 13 | Hardcoded | In-memory | `xerohdm`, `ntfy-bin` | Per package |
+| 14 | HTTP POST | HTTP/HTTPS | `{api_url}` (local LLM server) | Per package (AI review) |
+| 15 | Subprocess | Local | `makepkg -si --noconfirm` | Per confirmed package |
+
+### External Network Destinations
+
+| Domain | Protocol | Purpose |
+|--------|----------|---------|
+| `aur.archlinux.org` | HTTPS (POST + GET) | AUR RPC API (package metadata), PKGBUILD fetch |
+| `{api_url}` (default `localhost:8080`) | HTTP/HTTPS | AI/LLM inference endpoint (OpenAI-compatible) |
+
+### Local External Programs Invoked
+
+| Program | Purpose |
+|---------|---------|
+| `pacman` (`-Qm`) | Detect installed AUR packages |
+| `git` (`clone`, `pull`, `log`) | Clone/fetch AUR repos, extract commit metadata |
+| `makepkg` (`-si --noconfirm`) | Build and install packages (with `sudo`) |
+
+### Security Notes
+
+- **AI endpoint** is configurable — defaults to local `localhost:8080` but can point to any URL. API key is sent as a Bearer token if configured.
+- **AUR data** is cached to `~/.cache/yea/` to avoid redundant network calls.
+- **PKGBUILD execution** runs `makepkg -si` which invokes `sudo` for actual installation — the user must trust the reviewed PKGBUILD.
+- No other external APIs, telemetry, or "phone-home" behavior exists in the codebase.
+
 
 - Python 3.10+
 - Arch Linux (pacman, makepkg, git)
