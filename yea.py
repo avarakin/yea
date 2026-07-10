@@ -121,8 +121,10 @@ def _fmt_ts(val):
     return datetime.utcfromtimestamp(val).isoformat()
 
 
-def _build_metadata(aur_info: dict | None, pkgbuild: str | None, git_meta: dict) -> dict:
-    """Build the full metadata dict from AUR info, PKGBUILD, and git metadata."""
+def _build_metadata(aur_info: dict | None, pkgbuild: str | None, git_meta: dict,
+                    pkgbuild_diff: str, download_urls: list[str], checksums: dict,
+                    package_type: str, has_systemd: bool, has_install: bool) -> dict:
+    """Build the full metadata dict from AUR info, PKGBUILD, git metadata, and analysis."""
     if aur_info:
         metadata = {
             "Version": extract_pkgver(pkgbuild),
@@ -138,6 +140,15 @@ def _build_metadata(aur_info: dict | None, pkgbuild: str | None, git_meta: dict)
             "aur_popularity": str(aur_info.get("Popularity", "N/A")),
             "aur_first_submitted": _fmt_ts(aur_info.get("FirstSubmitted")),
             "aur_last_modified": _fmt_ts(aur_info.get("LastModified")),
+            "pkgbuild_diff": pkgbuild_diff,
+            "download_urls": ", ".join(download_urls) if download_urls else "N/A",
+            "checksum_sha256": "Yes" if checksums.get("sha256") else "No",
+            "checksum_sha512": "Yes" if checksums.get("sha512") else "No",
+            "checksum_md5": "Yes" if checksums.get("md5") else "No",
+            "checksum_pgp": "Yes" if checksums.get("pgp") else "No",
+            "package_type": package_type,
+            "has_systemd_service": "Yes" if has_systemd else "No",
+            "has_install_script": "Yes" if has_install else "No",
         }
     else:
         metadata = {
@@ -154,6 +165,15 @@ def _build_metadata(aur_info: dict | None, pkgbuild: str | None, git_meta: dict)
             "aur_popularity": "N/A",
             "aur_first_submitted": "N/A",
             "aur_last_modified": "N/A",
+            "pkgbuild_diff": pkgbuild_diff,
+            "download_urls": ", ".join(download_urls) if download_urls else "N/A",
+            "checksum_sha256": "Yes" if checksums.get("sha256") else "No",
+            "checksum_sha512": "Yes" if checksums.get("sha512") else "No",
+            "checksum_md5": "Yes" if checksums.get("md5") else "No",
+            "checksum_pgp": "Yes" if checksums.get("pgp") else "No",
+            "package_type": package_type,
+            "has_systemd_service": "Yes" if has_systemd else "No",
+            "has_install_script": "Yes" if has_install else "No",
         }
     metadata.update(git_meta)
     return metadata
@@ -371,6 +391,115 @@ def get_repo_metadata(pkgname: str, cache_dir: str) -> dict:
     return metadata
 
 
+def get_previous_pkgbuild(pkgname: str, cache_dir: str) -> str | None:
+    """Get the PKGBUILD from the previous git commit."""
+    repo_dir = Path(cache_dir) / pkgname
+    if not repo_dir.exists():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_dir), "show", "HEAD:PKGBUILD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def get_pkgbuild_diff(pkgname: str, cache_dir: str) -> str:
+    """Get the diff between the current and previous PKGBUILD."""
+    current = fetch_pkgbuild(pkgname, cache_dir)
+    previous = get_previous_pkgbuild(pkgname, cache_dir)
+    if not previous or not current:
+        return "N/A (no previous version available)"
+    tmp_dir = Path(cache_dir) / pkgname / ".tmp_diff"
+    tmp_dir.mkdir(exist_ok=True)
+    prev_file = tmp_dir / "previous"
+    curr_file = tmp_dir / "current"
+    prev_file.write_text(previous)
+    curr_file.write_text(current)
+    try:
+        result = subprocess.run(
+            ["diff", "-u", str(prev_file), str(curr_file)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode in (0, 1):
+            output = result.stdout.strip()
+            return output if output else "No changes (identical to previous version)"
+        return "Unable to compute diff"
+    finally:
+        prev_file.unlink(missing_ok=True)
+        curr_file.unlink(missing_ok=True)
+        tmp_dir.rmdir()
+
+
+def _extract_download_urls(pkgbuild: str | None) -> list[str]:
+    """Extract unique hostnames from source URLs in the PKGBUILD."""
+    if not pkgbuild:
+        return []
+    urls = set()
+    # Match source entries with URLs
+    for match in re.finditer(r'https?://[^\s\'")]+', pkgbuild):
+        url = match.group(0)
+        # Extract hostname
+        parsed = urllib.parse.urlparse(url)
+        if parsed.hostname:
+            urls.add(parsed.hostname)
+    return sorted(urls)
+
+
+def _check_checksums(pkgbuild: str | None) -> dict:
+    """Check which checksum types are present in the PKGBUILD."""
+    if not pkgbuild:
+        return {"sha256": False, "sha512": False, "md5": False, "pgp": False}
+    return {
+        "sha256": bool(re.search(r"sha256sums\s*=", pkgbuild)),
+        "sha512": bool(re.search(r"sha512sums\s*=", pkgbuild)),
+        "md5": bool(re.search(r"md5sums\s*=", pkgbuild)),
+        "pgp": bool(re.search(r"validpgpkeys\s*=", pkgbuild)),
+    }
+
+
+def _determine_package_type(pkgbuild: str | None) -> str:
+    """Determine if package is binary or source based on source URLs."""
+    if not pkgbuild:
+        return "unknown"
+    binary_patterns = [r"\.deb$", r"\.rpm$", r"\.pkg\.tar", r"\.AppImage$", r"\.run$",
+                       r"/dl\.google\.com/", r"edge\.dropboxstatic\.com"]
+    for pattern in binary_patterns:
+        if re.search(pattern, pkgbuild):
+            return "binary"
+    return "source"
+
+
+def _check_systemd_service(pkgbuild: str | None) -> bool:
+    """Check if the package installs a systemd service."""
+    if not pkgbuild:
+        return False
+    # Check for .service files in source array (not in URLs)
+    if re.search(r"['\"].*\.service['\"]", pkgbuild):
+        return True
+    # Check for installation of .service files in package() function
+    if re.search(r"systemd/system|systemd/user", pkgbuild):
+        return True
+    # Check for install -Dm644 ...*.service
+    if re.search(r"install.*\.service", pkgbuild):
+        return True
+    return False
+
+
+def _check_install_script(pkgbuild: str | None) -> bool:
+    """Check if the package has a .install script."""
+    if not pkgbuild:
+        return False
+    return bool(re.search(r"^install\s*=", pkgbuild, re.MULTILINE))
+
+
 # ─── AI Security Review ──────────────────────────────────────────────────────
 
 
@@ -396,6 +525,15 @@ def call_ai_review(pkgname: str, pkgbuild: str, metadata: dict, config: dict) ->
         aur_first_submitted=metadata.get("aur_first_submitted", "N/A"),
         aur_last_modified=metadata.get("aur_last_modified", "N/A"),
         pkgbuild=pkgbuild,
+        pkgbuild_diff=metadata.get("pkgbuild_diff", "N/A"),
+        download_urls=metadata.get("download_urls", "N/A"),
+        checksum_sha256=metadata.get("checksum_sha256", "No"),
+        checksum_sha512=metadata.get("checksum_sha512", "No"),
+        checksum_md5=metadata.get("checksum_md5", "No"),
+        checksum_pgp=metadata.get("checksum_pgp", "No"),
+        package_type=metadata.get("package_type", "unknown"),
+        has_systemd_service=metadata.get("has_systemd_service", "No"),
+        has_install_script=metadata.get("has_install_script", "No"),
     )
 
     body = {
@@ -1116,7 +1254,15 @@ def _fetch_pkg_data(pkg: str, config: dict) -> dict:
     aur_info = get_aur_pkginfo(pkg)
     git_meta = get_repo_metadata(pkg, cache_dir)
     pkgbuild = fetch_pkgbuild(pkg, cache_dir)
-    metadata = _build_metadata(aur_info, pkgbuild, git_meta)
+    pkgbuild_diff = get_pkgbuild_diff(pkg, cache_dir)
+    download_urls = _extract_download_urls(pkgbuild)
+    checksums = _check_checksums(pkgbuild)
+    package_type = _determine_package_type(pkgbuild)
+    has_systemd = _check_systemd_service(pkgbuild)
+    has_install = _check_install_script(pkgbuild)
+    metadata = _build_metadata(aur_info, pkgbuild, git_meta,
+                               pkgbuild_diff, download_urls, checksums,
+                               package_type, has_systemd, has_install)
     vulns = check_vulnerabilities(pkg, aur_info) if config.get("vulnerability_check", True) else []
     return {
         "aur_info": aur_info,
@@ -1242,7 +1388,15 @@ def run_install_mode(stdscr, config: dict, packages: list[str]) -> None:
         clone_or_pull_repo(pkg, config["cache_dir"])
         git_meta = get_repo_metadata(pkg, config["cache_dir"])
         pkgbuild = fetch_pkgbuild(pkg, config["cache_dir"])
-        metadata = _build_metadata(aur_info, pkgbuild, git_meta)
+        pkgbuild_diff = get_pkgbuild_diff(pkg, config["cache_dir"])
+        download_urls = _extract_download_urls(pkgbuild)
+        checksums = _check_checksums(pkgbuild)
+        package_type = _determine_package_type(pkgbuild)
+        has_systemd = _check_systemd_service(pkgbuild)
+        has_install = _check_install_script(pkgbuild)
+        metadata = _build_metadata(aur_info, pkgbuild, git_meta,
+                                   pkgbuild_diff, download_urls, checksums,
+                                   package_type, has_systemd, has_install)
         vulns = check_vulnerabilities(pkg, aur_info) if config.get("vulnerability_check", True) else []
         pkg_data[pkg] = {
             "aur_info": aur_info,

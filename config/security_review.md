@@ -19,6 +19,21 @@ You are a security expert reviewing an Arch Linux AUR package for potential risk
 - **First Submitted**: {aur_first_submitted}
 - **Last Modified**: {aur_last_modified}
 
+## Package Analysis
+- **Package Type**: {package_type} (source = compiles from source, binary = pre-built)
+- **Download Sources**: {download_urls}
+- **SHA256 Checksum**: {checksum_sha256}
+- **SHA512 Checksum**: {checksum_sha512}
+- **MD5 Checksum**: {checksum_md5}
+- **PGP Verification**: {checksum_pgp}
+- **Systemd Service**: {has_systemd_service}
+- **Install Script (.install)**: {has_install_script}
+
+## PKGBUILD Diff (Previous → Current)
+```diff
+{pkgbuild_diff}
+```
+
 ## PKGBUILD Content
 ```bash
 {pkgbuild}
@@ -33,6 +48,8 @@ Analyze the PKGBUILD and metadata for security risks. Consider:
 5. **Maintainer trust**: How recent is the maintainer change? Is the package recently abandoned or transferred?
 6. **Build reproducibility**: Are sources verified with checksums? Are patches applied safely?
 7. **Post-install hooks**: Are there any scripts that run after installation?
+8. **Changes from previous version**: What changed in this update? Are there any suspicious additions?
+9. **Binary vs source risk**: Binary packages carry the risk of unverifiable builds; source packages carry the risk of build-time exploits.
 
 ## Output Format
 Respond ONLY with a JSON object in the following format (no markdown, no extra text):
