@@ -16,10 +16,9 @@ import os
 import pty
 import re
 import select
-import shutil
+import signal
 import subprocess
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,108 +40,6 @@ logger.addHandler(_handler)
 # ─── Subprocess helpers ──────────────────────────────────────────────────────
 
 
-def run_cmd_silent(
-    cmd: list[str],
-    cwd: str | None = None,
-) -> int:
-    """Run a command silently (capture output, discard it). No PTY."""
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            cwd=cwd,
-            timeout=120,
-        )
-        return result.returncode
-    except subprocess.TimeoutExpired:
-        return 1
-    except Exception:
-        return 1
-
-
-def run_cmd_pty_curses(
-    cmd: list[str],
-    stdscr,
-    output_y: int,
-    max_lines: int = 20,
-) -> tuple[int, int]:
-    """
-    Run a command through a PTY and display output directly in the curses
-    screen at a given row. Output scrolls upward as new lines arrive.
-
-    Returns (exit_code, next_output_y).
-    """
-    master_fd, slave_fd = pty.openpty()
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-        )
-    except Exception:
-        os.close(master_fd)
-        os.close(slave_fd)
-        raise
-
-    os.close(slave_fd)
-
-    lines: list[str] = []
-    max_y, max_x = stdscr.getmaxyx()
-    partial = b""
-
-    try:
-        while True:
-            r, _, _ = select.select([master_fd], [], [], 1.0)
-            if r:
-                try:
-                    chunk = os.read(master_fd, 4096)
-                except OSError:
-                    break
-                if not chunk:
-                    break
-                partial += chunk
-                # Process complete lines
-                while b"\n" in partial:
-                    line_bytes, partial = partial.split(b"\n", 1)
-                    decoded = line_bytes.decode(errors="replace")
-                    # Strip ANSI escape sequences
-                    decoded = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", decoded)
-                    decoded = re.sub(r"\x1b\][^\x07]*\x07", "", decoded)
-                    decoded = re.sub(r"\x1b[^\x07\x1b]", "", decoded)
-                    stripped = decoded.rstrip()
-                    if stripped:
-                        lines.append(stripped)
-
-            ret = proc.poll()
-            if ret is not None:
-                # Process any remaining partial line
-                if partial:
-                    decoded = partial.decode(errors="replace")
-                    decoded = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", decoded)
-                    decoded = re.sub(r"\x1b\][^\x07]*\x07", "", decoded)
-                    decoded = re.sub(r"\x1b[^\x07\x1b]", "", decoded)
-                    stripped = decoded.rstrip()
-                    if stripped:
-                        lines.append(stripped)
-                break
-
-            # Keep only the last max_lines lines
-            if len(lines) > max_lines:
-                lines = lines[-max_lines:]
-
-            # Draw output lines
-            for i, line in enumerate(lines):
-                screen_y = output_y + i
-                if screen_y < max_y - 1:
-                    draw_line(stdscr, screen_y, 0, line[:max_x - 1], curses.A_NORMAL)
-            stdscr.refresh()
-
-        proc.wait()
-        return (proc.returncode, output_y + len(lines))
-    finally:
-        os.close(master_fd)
-
-
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 DEFAULT_CONFIG = {
@@ -153,10 +50,6 @@ DEFAULT_CONFIG = {
     "prompt_template_path": "config/security_review.md",
     "vulnerability_check": True,
 }
-
-VULNERABILITY_LIST_URL = (
-    "https://aur.archlinux.org/packages/%s"
-)
 
 
 def load_config() -> dict:
@@ -268,7 +161,7 @@ def _build_metadata(aur_info: dict | None, pkgbuild: str | None, git_meta: dict)
 
 # ─── AUR API ─────────────────────────────────────────────────────────────────
 
-AUR_BASE = "https://aur.archlinux.org/rpc?v=5"
+AUR_BASE = "https://aur.archlinux.org/rpc"
 
 
 def aur_request(method: str, params: dict) -> dict:
@@ -325,33 +218,24 @@ def fetch_pkgbuild(pkgname: str, cache_dir: str) -> str | None:
 
 # ─── Vulnerability Check ─────────────────────────────────────────────────────
 
-VULN_DB_URL = "https://aur.archlinux.org/packages/%s"
+KNOWN_COMPROMISED = ["xerohdm", "ntfy-bin"]
 
 
-def check_vulnerabilities(pkgname: str) -> list[str]:
+def check_vulnerabilities(pkgname: str, aur_info: dict | None = None) -> list[str]:
     """
     Check if a package has known vulnerabilities.
     Returns a list of vulnerability descriptions.
     """
     vulns = []
 
-    # Check AUR for vulnerability flags
-    # AUR doesn't have a formal vulnerability DB, but we can check:
-    # 1. Package comments/flags
-    # 2. Known compromised packages list from community reports
-    known_compromised = [
-        "xerohdm",
-        "ntfy-bin",
-    ]
-
-    if pkgname in known_compromised:
+    if pkgname in KNOWN_COMPROMISED:
         vulns.append(
             f"WARNING: Package '{pkgname}' is in the known compromised packages list. "
             "This package has been reported as potentially malicious."
         )
 
-    # Check if the package has a "vulnerable" flag on AUR
-    info = get_aur_pkginfo(pkgname)
+    # Use provided aur_info if available, otherwise fetch it
+    info = aur_info if aur_info is not None else get_aur_pkginfo(pkgname)
     if info and info.get("OutOfDate") and info["OutOfDate"] > 0:
         age_days = (datetime.utcnow().timestamp() - info["OutOfDate"]) / 86400
         if age_days > 365:
@@ -372,16 +256,20 @@ def clone_or_pull_repo(pkgname: str, cache_dir: str) -> bool:
     repo_url = f"https://aur.archlinux.org/{pkgname}.git"
 
     if repo_dir.exists() and (repo_dir / ".git").exists():
-        rc = run_cmd_silent(
+        result = subprocess.run(
             ["git", "-C", str(repo_dir), "pull"],
+            capture_output=True,
             cwd=str(repo_dir),
+            timeout=120,
         )
-        return rc == 0
+        return result.returncode == 0
     else:
-        rc = run_cmd_silent(
+        result = subprocess.run(
             ["git", "clone", repo_url, str(repo_dir)],
+            capture_output=True,
+            timeout=120,
         )
-        return rc == 0
+        return result.returncode == 0
 
 
 def get_repo_metadata(pkgname: str, cache_dir: str) -> dict:
@@ -547,12 +435,21 @@ def call_ai_review(pkgname: str, pkgbuild: str, metadata: dict, config: dict) ->
 
     # Parse the JSON response from AI
     try:
-        # Try to extract JSON from the response
-        json_match = re.search(r"\{[^{}]*\"risk_score\"[^{}]*\}", content, re.DOTALL)
+        # Strip markdown code fences if present
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            first_newline = cleaned.index("\n")
+            cleaned = cleaned[first_newline + 1:]
+            if cleaned.endswith("```\n"):
+                cleaned = cleaned[:-4]
+            elif cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+        # Try to extract JSON object
+        json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if json_match:
             return json.loads(json_match.group())
         else:
-            return json.loads(content)
+            return json.loads(cleaned)
     except (json.JSONDecodeError, KeyError, IndexError):
         return {
             "risk_score": 50,
@@ -593,15 +490,6 @@ def get_installed_aur_packages() -> list[str]:
     except Exception:
         pass
     return []
-
-
-def is_package_in_official_repos(pkgname: str) -> bool:
-    """Check if a package exists in the official Arch Linux repos."""
-    try:
-        rc = run_cmd_silent(["pacman", "-Si", pkgname])
-        return rc == 0
-    except Exception:
-        return False
 
 
 # ─── TUI Helpers ──────────────────────────────────────────────────────────────
@@ -976,7 +864,7 @@ def screen_security_review(
 
     # Risk score
     draw_line(stdscr, 4, 2, f"Risk Score: {score}/100", curses.A_BOLD)
-    attr = curses.color_pair(curses.color_pair(1) if rating == "high" else (2 if rating == "medium" else 3))
+    attr = curses.color_pair(1 if rating == "high" else (2 if rating == "medium" else 3))
     draw_line(stdscr, 5, 2, f"Rating: {rating.upper()}", attr | curses.A_BOLD)
 
     # Metadata
@@ -991,7 +879,10 @@ def screen_security_review(
     cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Submitter: {metadata.get('aur_submitter', 'N/A')}", max_y_limit=max_y - 2)
     cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Co-Maintainers: {metadata.get('aur_co_maintainers', 'N/A')}", max_y_limit=max_y - 2)
     cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"License: {metadata.get('aur_license', 'N/A')}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"URL: {metadata.get('aur_url', 'N/A')}", max_y_limit=max_y - 2)
+    _url = metadata.get("aur_url", "N/A")
+    if _url and len(_url) > 50:
+        _url = _url[:47] + "..."
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"URL: {_url}", max_y_limit=max_y - 2)
     cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Depends: {metadata.get('aur_depends', 'N/A')}", max_y_limit=max_y - 2)
     cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"MakeDepends: {metadata.get('aur_makedepends', 'N/A')}", max_y_limit=max_y - 2)
     cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Num Votes: {metadata.get('aur_num_votes', 'N/A')}", max_y_limit=max_y - 2)
@@ -1070,19 +961,6 @@ def screen_confirmation(stdscr, packages: list[str]) -> list[str]:
             return packages
         elif key == ord("q"):
             sys.exit(0)
-
-
-def screen_installing(stdscr, pkgname: str) -> None:
-    """Show installation progress for a single package."""
-    curses.curs_set(0)
-    stdscr.clear()
-    stdscr.nodelay(False)
-
-    max_y, max_x = stdscr.getmaxyx()
-
-    draw_header(stdscr, 0, f"Installing: {pkgname}")
-    draw_footer(stdscr, max_y - 2, ["Output below — may take a while..."])
-    stdscr.refresh()
 
 
 def screen_done(
@@ -1239,7 +1117,7 @@ def _fetch_pkg_data(pkg: str, config: dict) -> dict:
     git_meta = get_repo_metadata(pkg, cache_dir)
     pkgbuild = fetch_pkgbuild(pkg, cache_dir)
     metadata = _build_metadata(aur_info, pkgbuild, git_meta)
-    vulns = check_vulnerabilities(pkg) if config.get("vulnerability_check", True) else []
+    vulns = check_vulnerabilities(pkg, aur_info) if config.get("vulnerability_check", True) else []
     return {
         "aur_info": aur_info,
         "metadata": metadata,
@@ -1265,16 +1143,15 @@ def _run_review_and_install(
             log[-1] = ("✓", f"{pkg} — git clone/pull")
             draw_progress_log(stdscr, "Fetching Package Data", log, i)
     else:
-        log = []
+        log = []  # Will be populated during AI review phase
 
-    # Vulnerability checks
-    for pkg in selected:
-        vulns = pkg_data[pkg]["vulns"]
-        if vulns:
-            proceed = screen_vulnerability_alert(stdscr, pkg, vulns)
-            if not proceed:
-                selected.remove(pkg)
-                continue
+    # Vulnerability checks — build new list excluding skipped packages
+    selected = [
+        pkg for pkg in selected
+        if pkg_data[pkg]["vulns"]
+        and screen_vulnerability_alert(stdscr, pkg, pkg_data[pkg]["vulns"])
+        or not pkg_data[pkg]["vulns"]
+    ]
 
     if not selected:
         return
@@ -1361,10 +1238,11 @@ def run_install_mode(stdscr, config: dict, packages: list[str]) -> None:
     pkg_data = {}
     for pkg in selected:
         aur_info = aur_infos[pkg]
+        clone_or_pull_repo(pkg, config["cache_dir"])
         git_meta = get_repo_metadata(pkg, config["cache_dir"])
         pkgbuild = fetch_pkgbuild(pkg, config["cache_dir"])
         metadata = _build_metadata(aur_info, pkgbuild, git_meta)
-        vulns = check_vulnerabilities(pkg) if config.get("vulnerability_check", True) else []
+        vulns = check_vulnerabilities(pkg, aur_info) if config.get("vulnerability_check", True) else []
         pkg_data[pkg] = {
             "aur_info": aur_info,
             "metadata": metadata,
@@ -1378,7 +1256,28 @@ def run_install_mode(stdscr, config: dict, packages: list[str]) -> None:
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 
 
+_curses_restored = False
+
+
+def _restore_terminal(signum=None, frame=None):
+    """Restore terminal state on exit (Ctrl+C, etc.)."""
+    global _curses_restored
+    if not _curses_restored:
+        _curses_restored = True
+        try:
+            curses.nocbreak()
+            curses.echo()
+            curses.curs_set(1)
+            curses.endwin()
+        except Exception:
+            pass
+        sys.exit(1)
+
+
 def main():
+    signal.signal(signal.SIGINT, _restore_terminal)
+    signal.signal(signal.SIGTERM, _restore_terminal)
+
     parser = argparse.ArgumentParser(
         description="yea - Yet Another AUR installer with AI security review"
     )
