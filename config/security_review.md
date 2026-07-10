@@ -6,6 +6,19 @@ You are a security expert reviewing an Arch Linux AUR package for potential risk
 - **Last Change Date**: {last_change_date}
 - **Maintainer Change Date**: {maintainer_change_date}
 
+## AUR API Data
+- **Maintainer**: {aur_maintainer}
+- **Submitter**: {aur_submitter}
+- **Co-Maintainers**: {aur_co_maintainers}
+- **License**: {aur_license}
+- **URL**: {aur_url}
+- **Depends**: {aur_depends}
+- **MakeDepends**: {aur_makedepends}
+- **NumVotes**: {aur_num_votes}
+- **Popularity**: {aur_popularity}
+- **First Submitted**: {aur_first_submitted}
+- **Last Modified**: {aur_last_modified}
+
 ## PKGBUILD Content
 ```bash
 {pkgbuild}

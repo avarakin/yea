@@ -203,6 +203,19 @@ def load_prompt_template(config: dict) -> str:
         )
 
 
+# ─── PKGBUILD Parsing ────────────────────────────────────────────────────────
+
+
+def extract_pkgver(pkgbuild: str | None) -> str:
+    """Extract pkgver from PKGBUILD content."""
+    if not pkgbuild:
+        return "unknown"
+    match = re.search(r"^pkgver\s*=\s*[\'\"]?([^\'\"\s]+)[\'\"]?" , pkgbuild, re.MULTILINE)
+    if match:
+        return match.group(1)
+    return "unknown"
+
+
 # ─── AUR API ─────────────────────────────────────────────────────────────────
 
 AUR_BASE = "https://aur.archlinux.org/rpc?v=5"
@@ -210,9 +223,9 @@ AUR_BASE = "https://aur.archlinux.org/rpc?v=5"
 
 def aur_request(method: str, params: dict) -> dict:
     """Make a request to the AUR RPC API."""
-    url = f"{AUR_BASE}&type={method}"
-    data = urllib.parse.urlencode(params).encode()
-    req = urllib.request.Request(url, data=data, method="POST")
+    body_params = {"v": "5", "type": method, **params}
+    data = urllib.parse.urlencode(body_params).encode()
+    req = urllib.request.Request(f"{AUR_BASE}", data=data, method="POST")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
 
     try:
@@ -433,6 +446,17 @@ def call_ai_review(pkgname: str, pkgbuild: str, metadata: dict, config: dict) ->
         pkgver=metadata.get("Version", "unknown"),
         last_change_date=metadata.get("last_change_date", "N/A"),
         maintainer_change_date=metadata.get("maintainer_change_date", "N/A"),
+        aur_maintainer=metadata.get("aur_maintainer", "N/A"),
+        aur_submitter=metadata.get("aur_submitter", "N/A"),
+        aur_co_maintainers=metadata.get("aur_co_maintainers", "N/A"),
+        aur_license=metadata.get("aur_license", "N/A"),
+        aur_url=metadata.get("aur_url", "N/A"),
+        aur_depends=metadata.get("aur_depends", "N/A"),
+        aur_makedepends=metadata.get("aur_makedepends", "N/A"),
+        aur_num_votes=metadata.get("aur_num_votes", "N/A"),
+        aur_popularity=metadata.get("aur_popularity", "N/A"),
+        aur_first_submitted=metadata.get("aur_first_submitted", "N/A"),
+        aur_last_modified=metadata.get("aur_last_modified", "N/A"),
         pkgbuild=pkgbuild,
     )
 
@@ -541,6 +565,42 @@ def draw_line(stdscr, y: int, x: int, text: str, attr: int = 0):
             stdscr.addnstr(y, x, text, max_x - x, attr)
         except curses.error:
             pass
+
+
+def wrap_text(text: str, width: int) -> list[str]:
+    """Wrap text to the given width, preserving word boundaries."""
+    words = text.split()
+    if not words:
+        return []
+    lines = []
+    current_line = words[0]
+    for word in words[1:]:
+        if len(current_line) + 1 + len(word) <= width:
+            current_line += " " + word
+        else:
+            lines.append(current_line)
+            current_line = word
+    lines.append(current_line)
+    return lines
+
+
+def draw_wrapped_text(stdscr, y: int, x: int, text: str, attr: int = 0, max_y_limit: int | None = None) -> int:
+    """Draw text wrapped to terminal width, starting at (y, x).
+
+    Returns the next available y coordinate after drawing.
+    """
+    max_screen_y, max_x = stdscr.getmaxyx()
+    available_width = max_x - x
+    if available_width < 10:
+        return y
+    wrapped = wrap_text(text, available_width)
+    for i, line in enumerate(wrapped):
+        draw_y = y + i
+        if max_y_limit and draw_y >= max_y_limit:
+            break
+        if draw_y < max_screen_y:
+            draw_line(stdscr, draw_y, x, line, attr)
+    return y + len(wrapped)
 
 
 def draw_checkbox(
@@ -958,35 +1018,45 @@ def screen_security_review(
 
     # Metadata
     draw_line(stdscr, 7, 2, "Package Metadata:")
-    draw_line(stdscr, 8, 4, f"Version: {metadata.get('Version', 'unknown')}")
-    draw_line(stdscr, 9, 4, f"Last Change: {metadata.get('last_change_date', 'N/A')}")
-    draw_line(stdscr, 10, 4, f"Maintainer Changed: {metadata.get('maintainer_change_date', 'N/A')}")
+    cur_y = draw_wrapped_text(stdscr, 8, 4, f"Version: {metadata.get('Version', 'unknown')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Last Change: {metadata.get('last_change_date', 'N/A')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Maintainer Changed: {metadata.get('maintainer_change_date', 'N/A')}", max_y_limit=max_y - 2)
+
+    # AUR API Data
+    cur_y = draw_wrapped_text(stdscr, cur_y, 2, "AUR API Data:", curses.A_BOLD, max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Maintainer: {metadata.get('aur_maintainer', 'N/A')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Submitter: {metadata.get('aur_submitter', 'N/A')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Co-Maintainers: {metadata.get('aur_co_maintainers', 'N/A')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"License: {metadata.get('aur_license', 'N/A')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"URL: {metadata.get('aur_url', 'N/A')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Depends: {metadata.get('aur_depends', 'N/A')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"MakeDepends: {metadata.get('aur_makedepends', 'N/A')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Num Votes: {metadata.get('aur_num_votes', 'N/A')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Popularity: {metadata.get('aur_popularity', 'N/A')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"First Submitted: {metadata.get('aur_first_submitted', 'N/A')}", max_y_limit=max_y - 2)
+    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Last Modified: {metadata.get('aur_last_modified', 'N/A')}", max_y_limit=max_y - 2)
 
     # Vulnerabilities
     if vulns:
-        draw_line(stdscr, 12, 2, "Vulnerabilities Detected:", curses.A_BOLD)
-        for i, vuln in enumerate(vulns):
-            draw_line(stdscr, 13 + i, 4, f"• {vuln}", curses.color_pair(1))
+        cur_y = draw_wrapped_text(stdscr, cur_y, 2, "Vulnerabilities Detected:", curses.A_BOLD, max_y_limit=max_y - 2)
+        for vuln in vulns:
+            cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"• {vuln}", curses.color_pair(1), max_y_limit=max_y - 2)
 
     # AI Summary
     summary = review.get("summary", "No summary available")
-    draw_line(stdscr, 16, 2, f"AI Assessment: {summary}", curses.A_BOLD)
+    summary_text = f"AI Assessment: {summary}"
+    cur_y = draw_wrapped_text(stdscr, cur_y, 2, summary_text, curses.A_BOLD, max_y_limit=max_y - 2)
 
     # Details
     details = review.get("details", [])
     if details:
-        draw_line(stdscr, 18, 2, "Findings:", curses.A_BOLD)
-        for i, detail in enumerate(details[:8]):  # Limit to 8 findings
+        cur_y = draw_wrapped_text(stdscr, cur_y, 2, "Findings:", curses.A_BOLD, max_y_limit=max_y - 2)
+        for detail in details[:8]:  # Limit to 8 findings
             severity = detail.get("severity", "info").upper()
             finding = detail.get("finding", "")
             sev_color = 3 if severity == "INFO" else (2 if severity == "WARNING" else 1)
-            draw_line(
-                stdscr,
-                19 + i,
-                4,
-                f"[{severity}] {finding}",
-                curses.color_pair(sev_color),
-            )
+            finding_text = f"[{severity}] {finding}"
+            cur_y = draw_wrapped_text(stdscr, cur_y, 4, finding_text, curses.color_pair(sev_color), max_y_limit=max_y - 2)
 
     draw_footer(
         stdscr,
@@ -1203,20 +1273,57 @@ def run_upgrade_mode(stdscr, config: dict) -> None:
 
         # Get AUR metadata
         aur_info = get_aur_pkginfo(pkg)
-        metadata = {
-            "Version": aur_info.get("Version", "unknown") if aur_info else "unknown",
-            "Description": aur_info.get("Description", "") if aur_info else "",
-        }
 
         # Clone or pull repo
         clone_or_pull_repo(pkg, config["cache_dir"])
 
         # Get git metadata
         git_meta = get_repo_metadata(pkg, config["cache_dir"])
-        metadata.update(git_meta)
 
         # Fetch PKGBUILD
         pkgbuild = fetch_pkgbuild(pkg, config["cache_dir"])
+
+        def _fmt_list(val):
+            return ", ".join(val) if isinstance(val, list) and val else "N/A"
+
+        def _fmt_ts(val):
+            if not val:
+                return "N/A"
+            return datetime.utcfromtimestamp(val).isoformat()
+
+        if aur_info:
+            metadata = {
+                "Version": extract_pkgver(pkgbuild),
+                "Description": aur_info.get("Description", ""),
+                "aur_maintainer": aur_info.get("Maintainer") or "N/A",
+                "aur_submitter": aur_info.get("Submitter") or "N/A",
+                "aur_co_maintainers": _fmt_list(aur_info.get("CoMaintainers", [])),
+                "aur_license": _fmt_list(aur_info.get("License", [])),
+                "aur_url": aur_info.get("URL") or "N/A",
+                "aur_depends": _fmt_list(aur_info.get("Depends", [])),
+                "aur_makedepends": _fmt_list(aur_info.get("MakeDepends", [])),
+                "aur_num_votes": str(aur_info.get("NumVotes", "N/A")),
+                "aur_popularity": str(aur_info.get("Popularity", "N/A")),
+                "aur_first_submitted": _fmt_ts(aur_info.get("FirstSubmitted")),
+                "aur_last_modified": _fmt_ts(aur_info.get("LastModified")),
+            }
+        else:
+            metadata = {
+                "Version": extract_pkgver(pkgbuild),
+                "Description": "",
+                "aur_maintainer": "N/A",
+                "aur_submitter": "N/A",
+                "aur_co_maintainers": "N/A",
+                "aur_license": "N/A",
+                "aur_url": "N/A",
+                "aur_depends": "N/A",
+                "aur_makedepends": "N/A",
+                "aur_num_votes": "N/A",
+                "aur_popularity": "N/A",
+                "aur_first_submitted": "N/A",
+                "aur_last_modified": "N/A",
+            }
+        metadata.update(git_meta)
 
         # Check vulnerabilities
         vulns = []
@@ -1334,16 +1441,36 @@ def run_install_mode(stdscr, config: dict, packages: list[str]) -> None:
         log[-1] = ("✓", f"{pkg} — git clone/pull")
 
         aur_info = aur_infos[pkg]
-        metadata = {
-            "Version": aur_info.get("Version", "unknown"),
-            "Description": aur_info.get("Description", ""),
-        }
 
         clone_or_pull_repo(pkg, config["cache_dir"])
         git_meta = get_repo_metadata(pkg, config["cache_dir"])
-        metadata.update(git_meta)
 
         pkgbuild = fetch_pkgbuild(pkg, config["cache_dir"])
+
+        def _fmt_list(val):
+            return ", ".join(val) if isinstance(val, list) and val else "N/A"
+
+        def _fmt_ts(val):
+            if not val:
+                return "N/A"
+            return datetime.utcfromtimestamp(val).isoformat()
+
+        metadata = {
+            "Version": extract_pkgver(pkgbuild),
+            "Description": aur_info.get("Description", ""),
+            "aur_maintainer": aur_info.get("Maintainer") or "N/A",
+            "aur_submitter": aur_info.get("Submitter") or "N/A",
+            "aur_co_maintainers": _fmt_list(aur_info.get("CoMaintainers", [])),
+            "aur_license": _fmt_list(aur_info.get("License", [])),
+            "aur_url": aur_info.get("URL") or "N/A",
+            "aur_depends": _fmt_list(aur_info.get("Depends", [])),
+            "aur_makedepends": _fmt_list(aur_info.get("MakeDepends", [])),
+            "aur_num_votes": str(aur_info.get("NumVotes", "N/A")),
+            "aur_popularity": str(aur_info.get("Popularity", "N/A")),
+            "aur_first_submitted": _fmt_ts(aur_info.get("FirstSubmitted")),
+            "aur_last_modified": _fmt_ts(aur_info.get("LastModified")),
+        }
+        metadata.update(git_meta)
 
         vulns = []
         if config.get("vulnerability_check", True):
