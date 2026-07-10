@@ -592,7 +592,7 @@ def draw_progress_log(
 
     log: list of (status, message) tuples.
     status: '✓' for done, '...' for in-progress, '✗' for failed
-    current_idx: index of the currently processing item
+    current_idx: index of the currently processing item, or -1 to skip highlighting
     """
     curses.curs_set(0)
     stdscr.clear()
@@ -618,7 +618,7 @@ def draw_progress_log(
         screen_y = start_y + i
         if log_idx < len(log):
             status, msg = log[log_idx]
-            is_current = log_idx == current_idx
+            is_current = current_idx >= 0 and log_idx == current_idx
             if is_current:
                 attr = curses.A_BOLD | curses.A_REVERSE
             else:
@@ -1141,7 +1141,7 @@ def _run_review_and_install(
             log.append(("...", f"{pkg} — git clone/pull"))
             pkg_data[pkg] = _fetch_pkg_data(pkg, config)
             log[-1] = ("✓", f"{pkg} — git clone/pull")
-            draw_progress_log(stdscr, "Fetching Package Data", log, i)
+            draw_progress_log(stdscr, "Fetching Package Data", log, -1)
     else:
         log = []  # Will be populated during AI review phase
 
@@ -1158,7 +1158,8 @@ def _run_review_and_install(
 
     # AI Security Review
     for i, pkg in enumerate(selected):
-        log.append(("...", f"{pkg} — AI security review"))
+        log.append(("-", f"{pkg} — AI security review"))
+        draw_progress_log(stdscr, "Fetching Package Data", log, -1)
         review = call_ai_review(
             pkg,
             pkg_data[pkg]["pkgbuild"] or "",
@@ -1167,7 +1168,7 @@ def _run_review_and_install(
         )
         pkg_data[pkg]["review"] = review
         log[-1] = ("✓", f"{pkg} — AI security review")
-        draw_progress_log(stdscr, "Fetching Package Data", log, i)
+        draw_progress_log(stdscr, "Fetching Package Data", log, -1)
 
     # Show complete log
     draw_review_log_viewer(stdscr, log)
