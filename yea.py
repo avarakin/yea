@@ -11,6 +11,7 @@ Usage:
 import argparse
 import curses
 import json
+import logging
 import os
 import pty
 import re
@@ -24,6 +25,17 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
+
+logger = logging.getLogger("yea")
+logger.setLevel(logging.INFO)
+
+_handler = logging.FileHandler("/tmp/yea.log")
+_handler.setLevel(logging.INFO)
+_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+_handler.setFormatter(_formatter)
+logger.addHandler(_handler)
 
 
 # ─── Subprocess helpers ──────────────────────────────────────────────────────
@@ -437,6 +449,8 @@ def call_ai_review(pkgname: str, pkgbuild: str, metadata: dict, config: dict) ->
     api_url = config.get("api_url", "http://localhost:8080/v1/chat/completions")
 
     data = json.dumps(body).encode()
+    logger.info("AI REQUEST - URL: %s | Model: %s | Body: %s", api_url, config.get("api_model", "llama3"), data.decode())
+
     req = urllib.request.Request(api_url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
     if api_key:
@@ -445,6 +459,7 @@ def call_ai_review(pkgname: str, pkgbuild: str, metadata: dict, config: dict) ->
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             raw = resp.read().decode()
+            logger.info("AI_RESPONSE: %s", raw)
             response = json.loads(raw)
             content = response["choices"][0]["message"]["content"]
     except Exception as e:
