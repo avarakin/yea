@@ -1,15 +1,17 @@
-# yea - Yet Another AUR Installer
+# yea - Security centric AUR helper for Arch Linux
 
 A terminal TUI application for managing Arch Linux AUR packages with AI-powered security review.
 
 ## Features
 
+- **Zero dependencies**: Uses only Python standard library
+- **Easy development**: no compilation, no installation is required
 - **Upgrade mode**: Detect and upgrade all installed AUR packages
 - **Install mode**: Install specific AUR packages by name
 - **AI Security Review**: Uses OpenAI-compatible API (local llama.cpp or any provider) to analyze PKGBUILDs for security risks
 - **Vulnerability Detection**: Checks against known compromised packages and out-of-date warnings
 - **Interactive TUI**: Checkbox selection, one-by-one review, and confirmation flow
-- **Zero dependencies**: Uses only Python standard library
+
 
 ## Installation
 
