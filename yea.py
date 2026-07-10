@@ -12,6 +12,7 @@ import argparse
 import curses
 import json
 import logging
+import math
 import os
 import pty
 import re
@@ -265,6 +266,100 @@ def check_vulnerabilities(pkgname: str, aur_info: dict | None = None) -> list[st
             )
 
     return vulns
+
+
+# ─── Local Risk Score ────────────────────────────────────────────────────────
+
+
+def compute_local_risk_score(
+    pkgname: str,
+    metadata: dict,
+    aur_info: dict | None,
+) -> dict:
+    """Compute an internal risk score (1-100) based on package heuristics.
+
+    Returns a dict with 'score' (int 1-100) and 'factors' (list of strings).
+    """
+    score = 0
+    factors: list[str] = []
+
+    # Binary packages carry unverifiable build risk
+    if metadata.get("package_type") == "binary":
+        score += 20
+        factors.append("Binary package — unverifiable build")
+
+    # Checksum analysis
+    has_sha256 = metadata.get("checksum_sha256") == "Yes"
+    has_sha512 = metadata.get("checksum_sha512") == "Yes"
+    has_md5 = metadata.get("checksum_md5") == "Yes"
+    has_pgp = metadata.get("checksum_pgp") == "Yes"
+
+    if not has_sha256 and not has_sha512 and not has_md5:
+        score += 20
+        factors.append("No checksums present")
+    elif not has_sha256 and not has_sha512 and has_md5:
+        score += 10
+        factors.append("Only MD5 checksums — weak integrity check")
+
+    if not has_pgp:
+        score += 10
+        factors.append("No PGP signature verification")
+
+    # Network download sources
+    urls = metadata.get("download_urls", "")
+    if urls and urls != "N/A":
+        score += 10
+        factors.append(f"Downloads from external hosts: {urls}")
+
+    # Install script (.install file)
+    if metadata.get("has_install_script") == "Yes":
+        score += 10
+        factors.append("Has .install script — runs code during install")
+
+    # Systemd service
+    if metadata.get("has_systemd_service") == "Yes":
+        score += 5
+        factors.append("Installs a systemd service")
+
+    # Unknown maintainer
+    aur_maint = metadata.get("aur_maintainer", "N/A")
+    if aur_maint == "N/A" or not aur_maint:
+        score += 10
+        factors.append("No AUR maintainer listed")
+
+    # Out of date
+    if aur_info and aur_info.get("OutOfDate") and aur_info["OutOfDate"] > 0:
+        age_days = (datetime.utcnow().timestamp() - aur_info["OutOfDate"]) / 86400
+        if age_days > 365:
+            score += 15
+            factors.append(f"Out of date for {int(age_days)} days")
+
+    # Known compromised
+    if pkgname in KNOWN_COMPROMISED:
+        score += 50
+        factors.append("Package is in the known compromised list")
+
+    # Maintainer recency: 100 / days_since_change
+    maint_change = metadata.get("maintainer_change_date", "N/A")
+    if maint_change and maint_change != "N/A":
+        try:
+            # Parse ISO format date
+            change_dt = datetime.fromisoformat(maint_change)
+            days_since = (datetime.utcnow() - change_dt).days
+            if days_since > 0:
+                recency_score = 100 / days_since
+                score += int(recency_score)
+                factors.append(
+                    f"Maintainer changed {days_since} days ago "
+                    f"(recency risk: {recency_score:.1f})"
+                )
+        except (ValueError, TypeError):
+            pass
+
+    # Clamp to 1-100
+    score = max(1, min(100, score))
+
+    return {"score": score, "factors": factors}
 
 
 # ─── Git Manager ──────────────────────────────────────────────────────────────
@@ -569,6 +664,7 @@ def call_ai_review(pkgname: str, pkgbuild: str, metadata: dict, config: dict) ->
             "rating": "medium",
             "summary": "AI review unavailable - defaulting to medium risk",
             "details": [],
+            "ai_available": False,
         }
 
     # Parse the JSON response from AI
@@ -585,15 +681,20 @@ def call_ai_review(pkgname: str, pkgbuild: str, metadata: dict, config: dict) ->
         # Try to extract JSON object
         json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if json_match:
-            return json.loads(json_match.group())
+            result = json.loads(json_match.group())
+            result["ai_available"] = True
+            return result
         else:
-            return json.loads(cleaned)
+            result = json.loads(cleaned)
+            result["ai_available"] = True
+            return result
     except (json.JSONDecodeError, KeyError, IndexError):
         return {
             "risk_score": 50,
             "rating": "medium",
             "summary": "Failed to parse AI response - defaulting to medium risk",
             "details": [],
+            "ai_available": True,
         }
 
 
@@ -979,6 +1080,7 @@ def screen_security_review(
     metadata: dict,
     vulns: list[str],
     review: dict,
+    local_risk: dict | None = None,
 ) -> bool:
     """Show security review result for a package."""
     curses.curs_set(0)
@@ -988,9 +1090,10 @@ def screen_security_review(
     max_y, max_x = stdscr.getmaxyx()
 
     rating = review.get("rating", "unknown")
-    score = review.get("risk_score", 50)
+    ai_score = review.get("risk_score", 50)
+    ai_available = review.get("ai_available", True)
 
-    # Color based on risk
+    # Color based on AI risk
     if rating == "high":
         color_pair = 1
     elif rating == "medium":
@@ -1000,10 +1103,24 @@ def screen_security_review(
 
     draw_header(stdscr, 0, f"Security Review: {pkgname}")
 
-    # Risk score
-    draw_line(stdscr, 4, 2, f"Risk Score: {score}/100", curses.A_BOLD)
-    attr = curses.color_pair(1 if rating == "high" else (2 if rating == "medium" else 3))
-    draw_line(stdscr, 5, 2, f"Rating: {rating.upper()}", attr | curses.A_BOLD)
+    # Risk scores — side by side
+    ai_score_line = f"AI Risk: {ai_score}/100" if ai_available else "AI Risk: unavailable"
+    if local_risk:
+        local_line = f"Local Risk: {local_risk['score']}/100"
+    else:
+        local_line = "Local Risk: N/A"
+    draw_line(stdscr, 4, 2, f"{ai_score_line}    {local_line}", curses.A_BOLD)
+
+    if ai_available:
+        attr = curses.color_pair(1 if rating == "high" else (2 if rating == "medium" else 3))
+        draw_line(stdscr, 5, 2, f"AI Rating: {rating.upper()}", attr | curses.A_BOLD)
+    else:
+        draw_line(stdscr, 5, 2, "AI Rating: unavailable", curses.A_DIM)
+
+    if local_risk:
+        local_rating = "high" if local_risk["score"] >= 70 else ("medium" if local_risk["score"] >= 40 else "low")
+        local_attr = curses.color_pair(1 if local_rating == "high" else (2 if local_rating == "medium" else 3))
+        draw_line(stdscr, 6, 2, f"Local Rating: {local_rating.upper()} ({local_risk['score']}/100)", local_attr | curses.A_BOLD)
 
     # Metadata
     draw_line(stdscr, 7, 2, "Package Metadata:")
@@ -1034,10 +1151,19 @@ def screen_security_review(
         for vuln in vulns:
             cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"• {vuln}", curses.color_pair(1), max_y_limit=max_y - 2)
 
+    # Local risk factors
+    if local_risk and local_risk.get("factors"):
+        cur_y = draw_wrapped_text(stdscr, cur_y, 2, "Local Risk Factors:", curses.A_BOLD, max_y_limit=max_y - 2)
+        for factor in local_risk["factors"]:
+            cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"• {factor}", curses.A_DIM, max_y_limit=max_y - 2)
+
     # AI Summary
-    summary = review.get("summary", "No summary available")
-    summary_text = f"AI Assessment: {summary}"
-    cur_y = draw_wrapped_text(stdscr, cur_y, 2, summary_text, curses.A_BOLD, max_y_limit=max_y - 2)
+    if ai_available:
+        summary = review.get("summary", "No summary available")
+        summary_text = f"AI Assessment: {summary}"
+        cur_y = draw_wrapped_text(stdscr, cur_y, 2, summary_text, curses.A_BOLD, max_y_limit=max_y - 2)
+    else:
+        cur_y = draw_wrapped_text(stdscr, cur_y, 2, "AI Assessment: unavailable — relying on local analysis", curses.A_DIM, max_y_limit=max_y - 2)
 
     # Details
     details = review.get("details", [])
@@ -1248,7 +1374,7 @@ def run_upgrade_mode(stdscr, config: dict) -> None:
 
 
 def _fetch_pkg_data(pkg: str, config: dict) -> dict:
-    """Fetch all data for a single package. Returns dict with aur_info, metadata, pkgbuild, vulns."""
+    """Fetch all data for a single package. Returns dict with aur_info, metadata, pkgbuild, vulns, local_risk."""
     cache_dir = config["cache_dir"]
     clone_or_pull_repo(pkg, cache_dir)
     aur_info = get_aur_pkginfo(pkg)
@@ -1264,11 +1390,13 @@ def _fetch_pkg_data(pkg: str, config: dict) -> dict:
                                pkgbuild_diff, download_urls, checksums,
                                package_type, has_systemd, has_install)
     vulns = check_vulnerabilities(pkg, aur_info) if config.get("vulnerability_check", True) else []
+    local_risk = compute_local_risk_score(pkg, metadata, aur_info)
     return {
         "aur_info": aur_info,
         "metadata": metadata,
         "pkgbuild": pkgbuild,
         "vulns": vulns,
+        "local_risk": local_risk,
     }
 
 
@@ -1323,6 +1451,7 @@ def _run_review_and_install(
     packages_to_install = []
     for pkg in selected:
         review = pkg_data[pkg]["review"]
+        local_risk = pkg_data[pkg].get("local_risk")
         proceed = screen_security_review(
             stdscr,
             pkg,
@@ -1330,6 +1459,7 @@ def _run_review_and_install(
             pkg_data[pkg]["metadata"],
             pkg_data[pkg]["vulns"],
             review,
+            local_risk,
         )
         if proceed:
             packages_to_install.append(pkg)
@@ -1398,11 +1528,13 @@ def run_install_mode(stdscr, config: dict, packages: list[str]) -> None:
                                    pkgbuild_diff, download_urls, checksums,
                                    package_type, has_systemd, has_install)
         vulns = check_vulnerabilities(pkg, aur_info) if config.get("vulnerability_check", True) else []
+        local_risk = compute_local_risk_score(pkg, metadata, aur_info)
         pkg_data[pkg] = {
             "aur_info": aur_info,
             "metadata": metadata,
             "pkgbuild": pkgbuild,
             "vulns": vulns,
+            "local_risk": local_risk,
         }
 
     _run_review_and_install(selected, config, stdscr, pkg_data)
