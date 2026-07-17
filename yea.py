@@ -1225,8 +1225,9 @@ def _build_review_lines(
         lines.append(("Local Risk Factors:", curses.A_BOLD))
         for text, points in local_risk["factors"]:
             lines.append((f"• {text} (+{points})", curses.A_DIM))
-        if local_risk.get("diff_details"):
-            lines.append((f"  Diff: {local_risk['diff_details']}", curses.A_DIM))
+        diff_detail = local_risk.get("diff_details", "")
+        if diff_detail and "minimal change" not in diff_detail:
+            lines.append((f"  Diff: {diff_detail}", curses.A_DIM))
 
     # AI Summary
     if ai_available:
