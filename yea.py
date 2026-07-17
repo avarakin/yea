@@ -239,7 +239,24 @@ def fetch_pkgbuild(pkgname: str, cache_dir: str) -> str | None:
 
 # ─── Vulnerability Check ─────────────────────────────────────────────────────
 
-KNOWN_COMPROMISED = ["xerohdm", "ntfy-bin"]
+COMPROMISED_LIST_URL = "https://md.archlinux.org/s/SxbqukK6IA"
+
+
+def _fetch_compromised_list() -> set[str]:
+    """Fetch the known compromised packages list from the remote URL.
+
+    Returns an empty set if the fetch fails.
+    """
+    try:
+        req = urllib.request.Request(COMPROMISED_LIST_URL)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            text = resp.read().decode("utf-8")
+        return {line.strip() for line in text.splitlines() if line.strip()}
+    except Exception:
+        return set()
+
+
+KNOWN_COMPROMISED = _fetch_compromised_list()
 
 
 def check_vulnerabilities(pkgname: str, aur_info: dict | None = None) -> list[str]:
@@ -271,22 +288,51 @@ def check_vulnerabilities(pkgname: str, aur_info: dict | None = None) -> list[st
 # ─── Local Risk Score ────────────────────────────────────────────────────────
 
 
+def compute_diff_complexity_score(pkgbuild_diff: str) -> dict:
+    """Compute a risk score based on the size of the PKGBUILD diff.
+
+    Formula: max(total_lines_changed - 2, 0) * 10, capped at 100.
+    Returns a dict with 'score' (int 0-100) and 'details' string.
+    """
+    added = 0
+    removed = 0
+
+    for line in pkgbuild_diff.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("+") and not stripped.startswith("+++"):
+            added += 1
+        elif stripped.startswith("-") and not stripped.startswith("---"):
+            removed += 1
+
+    total_lines = added + removed
+    score = max(total_lines - 2, 0) * 10
+    score = max(0, min(100, score))
+
+    details = f"{added} lines added, {removed} lines removed ({total_lines} total)"
+    if total_lines <= 2:
+        details += " — minimal change"
+
+    return {"score": score, "details": details}
+
+
 def compute_local_risk_score(
     pkgname: str,
     metadata: dict,
     aur_info: dict | None,
+    pkgbuild_diff: str = "",
 ) -> dict:
     """Compute an internal risk score (1-100) based on package heuristics.
 
-    Returns a dict with 'score' (int 1-100) and 'factors' (list of strings).
+    Returns a dict with 'score' (int 1-100), 'factors' (list of (text, points) tuples),
+    and optionally 'diff_details'.
     """
     score = 0
-    factors: list[str] = []
+    factors: list[tuple[str, int]] = []
 
     # Binary packages carry unverifiable build risk
     if metadata.get("package_type") == "binary":
-        score += 20
-        factors.append("Binary package — unverifiable build")
+        score += 5
+        factors.append(("Binary package — unverifiable build", 5))
 
     # Checksum analysis
     has_sha256 = metadata.get("checksum_sha256") == "Yes"
@@ -296,70 +342,103 @@ def compute_local_risk_score(
 
     if not has_sha256 and not has_sha512 and not has_md5:
         score += 20
-        factors.append("No checksums present")
+        factors.append(("No checksums present", 20))
     elif not has_sha256 and not has_sha512 and has_md5:
         score += 10
-        factors.append("Only MD5 checksums — weak integrity check")
+        factors.append(("Only MD5 checksums — weak integrity check", 10))
 
     if not has_pgp:
-        score += 10
-        factors.append("No PGP signature verification")
+        score += 5
+        factors.append(("No PGP signature verification", 5))
 
     # Network download sources
     urls = metadata.get("download_urls", "")
     if urls and urls != "N/A":
-        score += 10
-        factors.append(f"Downloads from external hosts: {urls}")
+        score += 0
+        factors.append((f"Downloads from external hosts: {urls}", 0))
 
     # Install script (.install file)
     if metadata.get("has_install_script") == "Yes":
-        score += 10
-        factors.append("Has .install script — runs code during install")
+        score += 3
+        factors.append(("Has .install script — runs code during install", 3))
 
     # Systemd service
     if metadata.get("has_systemd_service") == "Yes":
         score += 5
-        factors.append("Installs a systemd service")
+        factors.append(("Installs a systemd service", 5))
 
     # Unknown maintainer
     aur_maint = metadata.get("aur_maintainer", "N/A")
     if aur_maint == "N/A" or not aur_maint:
         score += 10
-        factors.append("No AUR maintainer listed")
+        factors.append(("No AUR maintainer listed", 10))
 
     # Out of date
     if aur_info and aur_info.get("OutOfDate") and aur_info["OutOfDate"] > 0:
         age_days = (datetime.utcnow().timestamp() - aur_info["OutOfDate"]) / 86400
         if age_days > 365:
             score += 15
-            factors.append(f"Out of date for {int(age_days)} days")
+            factors.append((f"Out of date for {int(age_days)} days", 15))
+
+    # Popularity risk
+    aur_popularity = aur_info.get("Popularity") if aur_info else None
+    if aur_popularity is not None and aur_popularity >= 0:
+        pop_score = max(30 - int(aur_popularity * 15), 0)
+        if pop_score > 0:
+            score += pop_score
+            factors.append((f"Low popularity ({aur_popularity:.2f})", pop_score))
+    else:
+        score += 40
+        factors.append(("No popularity data available", 40))
+
+    # Votes risk
+    aur_votes = aur_info.get("NumVotes") if aur_info else None
+    if aur_votes is not None and aur_votes >= 0:
+        vote_score = max(30 - int(aur_votes * 0.3), 0)
+        if vote_score > 0:
+            score += vote_score
+            factors.append((f"Low votes ({aur_votes})", vote_score))
+    else:
+        score += 40
+        factors.append(("No votes data available", 40))
 
     # Known compromised
     if pkgname in KNOWN_COMPROMISED:
-        score += 50
-        factors.append("Package is in the known compromised list")
+        score = 100
+        factors.append(("Package is in the known compromised list", 100))
 
     # Maintainer recency: 100 / days_since_change
     maint_change = metadata.get("maintainer_change_date", "N/A")
     if maint_change and maint_change != "N/A":
         try:
-            # Parse ISO format date
             change_dt = datetime.fromisoformat(maint_change)
             days_since = (datetime.utcnow() - change_dt).days
             if days_since > 0:
                 recency_score = 100 / days_since
-                score += int(recency_score)
+                points = int(recency_score)
+                score += points
                 factors.append(
-                    f"Maintainer changed {days_since} days ago "
-                    f"(recency risk: {recency_score:.1f})"
+                    (f"Maintainer changed {days_since} days ago (recency risk: {recency_score:.1f})", points)
                 )
         except (ValueError, TypeError):
             pass
 
+    # Diff complexity
+    diff_details = None
+    if pkgbuild_diff and pkgbuild_diff not in ("N/A (no previous version available)", "No changes (identical to previous version)"):
+        diff_info = compute_diff_complexity_score(pkgbuild_diff)
+        score += diff_info["score"]
+        if diff_info["score"] > 0:
+            factors.append((f"Large PKGBUILD change: {diff_info['details']}", diff_info["score"]))
+        diff_details = diff_info["details"]
+
     # Clamp to 1-100
     score = max(1, min(100, score))
 
-    return {"score": score, "factors": factors}
+    result = {"score": score, "factors": factors}
+    if diff_details is not None:
+        result["diff_details"] = diff_details
+    return result
 
 
 # ─── Git Manager ──────────────────────────────────────────────────────────────
@@ -1154,8 +1233,10 @@ def screen_security_review(
     # Local risk factors
     if local_risk and local_risk.get("factors"):
         cur_y = draw_wrapped_text(stdscr, cur_y, 2, "Local Risk Factors:", curses.A_BOLD, max_y_limit=max_y - 2)
-        for factor in local_risk["factors"]:
-            cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"• {factor}", curses.A_DIM, max_y_limit=max_y - 2)
+        for text, points in local_risk["factors"]:
+            cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"• {text} (+{points})", curses.A_DIM, max_y_limit=max_y - 2)
+        if local_risk.get("diff_details"):
+            cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"  Diff: {local_risk['diff_details']}", curses.A_DIM, max_y_limit=max_y - 2)
 
     # AI Summary
     if ai_available:
@@ -1390,7 +1471,7 @@ def _fetch_pkg_data(pkg: str, config: dict) -> dict:
                                pkgbuild_diff, download_urls, checksums,
                                package_type, has_systemd, has_install)
     vulns = check_vulnerabilities(pkg, aur_info) if config.get("vulnerability_check", True) else []
-    local_risk = compute_local_risk_score(pkg, metadata, aur_info)
+    local_risk = compute_local_risk_score(pkg, metadata, aur_info, pkgbuild_diff)
     return {
         "aur_info": aur_info,
         "metadata": metadata,
@@ -1528,7 +1609,7 @@ def run_install_mode(stdscr, config: dict, packages: list[str]) -> None:
                                    pkgbuild_diff, download_urls, checksums,
                                    package_type, has_systemd, has_install)
         vulns = check_vulnerabilities(pkg, aur_info) if config.get("vulnerability_check", True) else []
-        local_risk = compute_local_risk_score(pkg, metadata, aur_info)
+        local_risk = compute_local_risk_score(pkg, metadata, aur_info, pkgbuild_diff)
         pkg_data[pkg] = {
             "aur_info": aur_info,
             "metadata": metadata,
