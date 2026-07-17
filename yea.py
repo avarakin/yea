@@ -210,11 +210,13 @@ def get_aur_pkginfo(pkgname: str) -> dict | None:
 
 
 def get_aur_pkginfos(pkgnames: list[str]) -> dict[str, dict]:
-    """Get metadata for multiple AUR packages."""
-    result = aur_request("info", {"arg": ",".join(pkgnames)})
-    if result.get("resulttype") == "error" or not result.get("results"):
-        return {}
-    return {pkg["Name"]: pkg for pkg in result["results"]}
+    """Get metadata for multiple AUR packages, calling the API once per package."""
+    result = {}
+    for pkgname in pkgnames:
+        info = get_aur_pkginfo(pkgname)
+        if info:
+            result[pkgname] = info
+    return result
 
 
 def fetch_pkgbuild(pkgname: str, cache_dir: str) -> str | None:
