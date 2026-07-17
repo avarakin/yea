@@ -211,7 +211,7 @@ def get_aur_pkginfo(pkgname: str) -> dict | None:
 
 def get_aur_pkginfos(pkgnames: list[str]) -> dict[str, dict]:
     """Get metadata for multiple AUR packages."""
-    result = aur_request("info", {"arg": pkgnames})
+    result = aur_request("info", {"arg": ",".join(pkgnames)})
     if result.get("resulttype") == "error" or not result.get("results"):
         return {}
     return {pkg["Name"]: pkg for pkg in result["results"]}
