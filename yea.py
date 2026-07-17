@@ -1151,6 +1151,101 @@ def screen_vulnerability_alert(
             sys.exit(0)
 
 
+def _build_review_lines(
+    pkgname: str,
+    metadata: dict,
+    vulns: list[str],
+    review: dict,
+    local_risk: dict | None = None,
+) -> list[tuple[str, int]]:
+    """Build the full scrollable content for the security review screen.
+
+    Returns a list of (text, curses_attr) tuples.
+    """
+    lines: list[tuple[str, int]] = []
+
+    rating = review.get("rating", "unknown")
+    ai_score = review.get("risk_score", 50)
+    ai_available = review.get("ai_available", True)
+
+    lines.append((f"Security Review: {pkgname}", curses.A_BOLD))
+
+    # Risk scores — side by side
+    ai_score_line = f"AI Risk: {ai_score}/100" if ai_available else "AI Risk: unavailable"
+    if local_risk:
+        local_line = f"Local Risk: {local_risk['score']}/100"
+    else:
+        local_line = "Local Risk: N/A"
+    lines.append((f"{ai_score_line}    {local_line}", curses.A_BOLD))
+
+    if ai_available:
+        attr = curses.color_pair(1 if rating == "high" else (2 if rating == "medium" else 3))
+        lines.append((f"AI Rating: {rating.upper()}", attr | curses.A_BOLD))
+    else:
+        lines.append(("AI Rating: unavailable", curses.A_DIM))
+
+    if local_risk:
+        local_rating = "high" if local_risk["score"] >= 70 else ("medium" if local_risk["score"] >= 40 else "low")
+        local_attr = curses.color_pair(1 if local_rating == "high" else (2 if local_rating == "medium" else 3))
+        lines.append((f"Local Rating: {local_rating.upper()} ({local_risk['score']}/100)", local_attr | curses.A_BOLD))
+
+    # Metadata
+    lines.append(("Package Metadata:", curses.A_BOLD))
+    lines.append((f"Version: {metadata.get('Version', 'unknown')}", 0))
+    lines.append((f"Last Change: {metadata.get('last_change_date', 'N/A')}", 0))
+    lines.append((f"Maintainer Changed: {metadata.get('maintainer_change_date', 'N/A')}", 0))
+
+    # AUR API Data
+    lines.append(("AUR API Data:", curses.A_BOLD))
+    lines.append((f"Maintainer: {metadata.get('aur_maintainer', 'N/A')}", 0))
+    lines.append((f"Submitter: {metadata.get('aur_submitter', 'N/A')}", 0))
+    lines.append((f"Co-Maintainers: {metadata.get('aur_co_maintainers', 'N/A')}", 0))
+    lines.append((f"License: {metadata.get('aur_license', 'N/A')}", 0))
+    _url = metadata.get("aur_url", "N/A")
+    if _url and len(_url) > 50:
+        _url = _url[:47] + "..."
+    lines.append((f"URL: {_url}", 0))
+    lines.append((f"Depends: {metadata.get('aur_depends', 'N/A')}", 0))
+    lines.append((f"MakeDepends: {metadata.get('aur_makedepends', 'N/A')}", 0))
+    lines.append((f"Num Votes: {metadata.get('aur_num_votes', 'N/A')}", 0))
+    lines.append((f"Popularity: {metadata.get('aur_popularity', 'N/A')}", 0))
+    lines.append((f"First Submitted: {metadata.get('aur_first_submitted', 'N/A')}", 0))
+    lines.append((f"Last Modified: {metadata.get('aur_last_modified', 'N/A')}", 0))
+
+    # Vulnerabilities
+    if vulns:
+        lines.append(("Vulnerabilities Detected:", curses.A_BOLD))
+        for vuln in vulns:
+            lines.append((f"• {vuln}", curses.color_pair(1)))
+
+    # Local risk factors
+    if local_risk and local_risk.get("factors"):
+        lines.append(("Local Risk Factors:", curses.A_BOLD))
+        for text, points in local_risk["factors"]:
+            lines.append((f"• {text} (+{points})", curses.A_DIM))
+        if local_risk.get("diff_details"):
+            lines.append((f"  Diff: {local_risk['diff_details']}", curses.A_DIM))
+
+    # AI Summary
+    if ai_available:
+        summary = review.get("summary", "No summary available")
+        lines.append((f"AI Assessment: {summary}", curses.A_BOLD))
+    else:
+        lines.append(("AI Assessment: unavailable — relying on local analysis", curses.A_DIM))
+
+    # Details
+    details = review.get("details", [])
+    if details:
+        lines.append(("Findings:", curses.A_BOLD))
+        for detail in details[:8]:  # Limit to 8 findings
+            severity = detail.get("severity", "info").upper()
+            finding = detail.get("finding", "")
+            sev_color = 3 if severity == "INFO" else (2 if severity == "WARNING" else 1)
+            lines.append((f"[{severity}] {finding}", curses.color_pair(sev_color)))
+
+    return lines
+
+
 def screen_security_review(
     stdscr,
     pkgname: str,
@@ -1160,111 +1255,51 @@ def screen_security_review(
     review: dict,
     local_risk: dict | None = None,
 ) -> bool:
-    """Show security review result for a package."""
+    """Show security review result for a package with scroll support."""
     curses.curs_set(0)
-    stdscr.clear()
     stdscr.nodelay(False)
 
-    max_y, max_x = stdscr.getmaxyx()
+    # Build all content lines
+    all_lines = _build_review_lines(pkgname, metadata, vulns, review, local_risk)
+    total_lines = len(all_lines)
 
-    rating = review.get("rating", "unknown")
-    ai_score = review.get("risk_score", 50)
-    ai_available = review.get("ai_available", True)
-
-    # Color based on AI risk
-    if rating == "high":
-        color_pair = 1
-    elif rating == "medium":
-        color_pair = 2
-    else:
-        color_pair = 3
-
-    draw_header(stdscr, 0, f"Security Review: {pkgname}")
-
-    # Risk scores — side by side
-    ai_score_line = f"AI Risk: {ai_score}/100" if ai_available else "AI Risk: unavailable"
-    if local_risk:
-        local_line = f"Local Risk: {local_risk['score']}/100"
-    else:
-        local_line = "Local Risk: N/A"
-    draw_line(stdscr, 4, 2, f"{ai_score_line}    {local_line}", curses.A_BOLD)
-
-    if ai_available:
-        attr = curses.color_pair(1 if rating == "high" else (2 if rating == "medium" else 3))
-        draw_line(stdscr, 5, 2, f"AI Rating: {rating.upper()}", attr | curses.A_BOLD)
-    else:
-        draw_line(stdscr, 5, 2, "AI Rating: unavailable", curses.A_DIM)
-
-    if local_risk:
-        local_rating = "high" if local_risk["score"] >= 70 else ("medium" if local_risk["score"] >= 40 else "low")
-        local_attr = curses.color_pair(1 if local_rating == "high" else (2 if local_rating == "medium" else 3))
-        draw_line(stdscr, 6, 2, f"Local Rating: {local_rating.upper()} ({local_risk['score']}/100)", local_attr | curses.A_BOLD)
-
-    # Metadata
-    draw_line(stdscr, 7, 2, "Package Metadata:")
-    cur_y = draw_wrapped_text(stdscr, 8, 4, f"Version: {metadata.get('Version', 'unknown')}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Last Change: {metadata.get('last_change_date', 'N/A')}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Maintainer Changed: {metadata.get('maintainer_change_date', 'N/A')}", max_y_limit=max_y - 2)
-
-    # AUR API Data
-    cur_y = draw_wrapped_text(stdscr, cur_y, 2, "AUR API Data:", curses.A_BOLD, max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Maintainer: {metadata.get('aur_maintainer', 'N/A')}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Submitter: {metadata.get('aur_submitter', 'N/A')}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Co-Maintainers: {metadata.get('aur_co_maintainers', 'N/A')}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"License: {metadata.get('aur_license', 'N/A')}", max_y_limit=max_y - 2)
-    _url = metadata.get("aur_url", "N/A")
-    if _url and len(_url) > 50:
-        _url = _url[:47] + "..."
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"URL: {_url}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Depends: {metadata.get('aur_depends', 'N/A')}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"MakeDepends: {metadata.get('aur_makedepends', 'N/A')}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Num Votes: {metadata.get('aur_num_votes', 'N/A')}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Popularity: {metadata.get('aur_popularity', 'N/A')}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"First Submitted: {metadata.get('aur_first_submitted', 'N/A')}", max_y_limit=max_y - 2)
-    cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"Last Modified: {metadata.get('aur_last_modified', 'N/A')}", max_y_limit=max_y - 2)
-
-    # Vulnerabilities
-    if vulns:
-        cur_y = draw_wrapped_text(stdscr, cur_y, 2, "Vulnerabilities Detected:", curses.A_BOLD, max_y_limit=max_y - 2)
-        for vuln in vulns:
-            cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"• {vuln}", curses.color_pair(1), max_y_limit=max_y - 2)
-
-    # Local risk factors
-    if local_risk and local_risk.get("factors"):
-        cur_y = draw_wrapped_text(stdscr, cur_y, 2, "Local Risk Factors:", curses.A_BOLD, max_y_limit=max_y - 2)
-        for text, points in local_risk["factors"]:
-            cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"• {text} (+{points})", curses.A_DIM, max_y_limit=max_y - 2)
-        if local_risk.get("diff_details"):
-            cur_y = draw_wrapped_text(stdscr, cur_y, 4, f"  Diff: {local_risk['diff_details']}", curses.A_DIM, max_y_limit=max_y - 2)
-
-    # AI Summary
-    if ai_available:
-        summary = review.get("summary", "No summary available")
-        summary_text = f"AI Assessment: {summary}"
-        cur_y = draw_wrapped_text(stdscr, cur_y, 2, summary_text, curses.A_BOLD, max_y_limit=max_y - 2)
-    else:
-        cur_y = draw_wrapped_text(stdscr, cur_y, 2, "AI Assessment: unavailable — relying on local analysis", curses.A_DIM, max_y_limit=max_y - 2)
-
-    # Details
-    details = review.get("details", [])
-    if details:
-        cur_y = draw_wrapped_text(stdscr, cur_y, 2, "Findings:", curses.A_BOLD, max_y_limit=max_y - 2)
-        for detail in details[:8]:  # Limit to 8 findings
-            severity = detail.get("severity", "info").upper()
-            finding = detail.get("finding", "")
-            sev_color = 3 if severity == "INFO" else (2 if severity == "WARNING" else 1)
-            finding_text = f"[{severity}] {finding}"
-            cur_y = draw_wrapped_text(stdscr, cur_y, 4, finding_text, curses.color_pair(sev_color), max_y_limit=max_y - 2)
-
-    draw_footer(
-        stdscr,
-        max_y - 2,
-        ["y: Install", "n: Skip", "q: Quit"],
-    )
-
-    stdscr.refresh()
+    # Header takes 1 line, footer takes 1 line
+    scroll_offset = 0
 
     while True:
+        stdscr.erase()
+        max_y, max_x = stdscr.getmaxyx()
+
+        # Visible content area: header(1) + footer(1) = 2 reserved lines
+        visible = max_y - 2
+        if visible < 1:
+            visible = 1
+
+        # Clamp scroll offset
+        max_offset = max(0, total_lines - visible)
+        scroll_offset = max(0, min(scroll_offset, max_offset))
+
+        # Draw header
+        header_text = all_lines[0][0]
+        draw_line(stdscr, 0, 0, "=" * max_x, curses.A_BOLD)
+        draw_line(stdscr, 0, 2, header_text, curses.A_BOLD | curses.A_UNDERLINE)
+        draw_line(stdscr, 0, 0, "=" * max_x, curses.A_BOLD)
+
+        # Draw visible content lines
+        for i in range(visible):
+            line_idx = scroll_offset + i
+            screen_y = 1 + i
+            if line_idx < len(all_lines):
+                text, attr = all_lines[line_idx]
+                draw_line(stdscr, screen_y, 2, text, attr)
+
+        # Footer
+        scroll_hint = f"  ↑/↓: Scroll ({scroll_offset + 1}/{total_lines})" if total_lines > visible else ""
+        draw_line(stdscr, max_y - 1, 0, "-" * max_x, curses.A_BOLD)
+        draw_line(stdscr, max_y - 1, 2, f"y: Install  n: Skip  q: Quit{scroll_hint}", curses.A_BOLD)
+
+        stdscr.refresh()
+
         key = stdscr.getch()
         if key == ord("y"):
             return True
@@ -1272,6 +1307,14 @@ def screen_security_review(
             return False
         elif key == ord("q"):
             sys.exit(0)
+        elif key == curses.KEY_UP:
+            scroll_offset = max(0, scroll_offset - 1)
+        elif key == curses.KEY_DOWN:
+            scroll_offset = min(max_offset, scroll_offset + 1)
+        elif key == curses.KEY_PPAGE:
+            scroll_offset = max(0, scroll_offset - visible)
+        elif key == curses.KEY_NPAGE:
+            scroll_offset = min(max_offset, scroll_offset + visible)
 
 
 def screen_confirmation(stdscr, packages: list[str]) -> list[str]:
