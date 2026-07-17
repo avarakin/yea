@@ -982,7 +982,7 @@ def draw_review_log_viewer(stdscr, log: list[tuple[str, str]]) -> None:
     curses.curs_set(0)
     max_y, max_x = stdscr.getmaxyx()
 
-    draw_header(stdscr, 0, "Complete Event Log")
+    draw_header(stdscr, 0, "Completed Security Review")
 
     start_y = 4
     end_y = max_y - 2
@@ -996,7 +996,7 @@ def draw_review_log_viewer(stdscr, log: list[tuple[str, str]]) -> None:
 
     while True:
         stdscr.erase()
-        draw_header(stdscr, 0, "Complete Event Log")
+        draw_header(stdscr, 0, "Completed Security Review")
 
         for i in range(visible):
             log_idx = scroll_offset + i
@@ -1153,10 +1153,12 @@ def screen_vulnerability_alert(
 
 def _build_review_lines(
     pkgname: str,
+    pkgbuild: str,
     metadata: dict,
     vulns: list[str],
     review: dict,
     local_risk: dict | None = None,
+    max_width: int = 80,
 ) -> list[tuple[str, int]]:
     """Build the full scrollable content for the security review screen.
 
@@ -1243,6 +1245,16 @@ def _build_review_lines(
             sev_color = 3 if severity == "INFO" else (2 if severity == "WARNING" else 1)
             lines.append((f"[{severity}] {finding}", curses.color_pair(sev_color)))
 
+    # PKGBUILD content
+    if pkgbuild:
+        lines.append(("" + "─" * (max_width - 2), curses.A_DIM))
+        lines.append(("PKGBUILD", curses.A_BOLD | curses.A_UNDERLINE))
+        lines.append(("" + "─" * (max_width - 2), curses.A_DIM))
+        for line in pkgbuild.splitlines():
+            wrapped = wrap_text(line, max_width - 4)
+            for w in wrapped:
+                lines.append((w, curses.A_DIM))
+
     return lines
 
 
@@ -1259,8 +1271,11 @@ def screen_security_review(
     curses.curs_set(0)
     stdscr.nodelay(False)
 
+    max_y, max_x = stdscr.getmaxyx()
+
     # Build all content lines
-    all_lines = _build_review_lines(pkgname, metadata, vulns, review, local_risk)
+    max_width = max_x - 2  # available width for content (indented at x=2)
+    all_lines = _build_review_lines(pkgname, pkgbuild, metadata, vulns, review, local_risk, max_width)
     total_lines = len(all_lines)
 
     # Header takes 1 line, footer takes 1 line
@@ -1538,7 +1553,7 @@ def _run_review_and_install(
             log.append(("...", f"{pkg} — git clone/pull"))
             pkg_data[pkg] = _fetch_pkg_data(pkg, config)
             log[-1] = ("✓", f"{pkg} — git clone/pull")
-            draw_progress_log(stdscr, "Fetching Package Data", log, -1)
+            draw_progress_log(stdscr, "Conducting Security Review", log, -1)
     else:
         log = []  # Will be populated during AI review phase
 
@@ -1556,7 +1571,7 @@ def _run_review_and_install(
     # AI Security Review
     for i, pkg in enumerate(selected):
         log.append(("-", f"{pkg} — AI security review"))
-        draw_progress_log(stdscr, "Fetching Package Data", log, -1)
+        draw_progress_log(stdscr, "Conducting Security Review", log, -1)
         review = call_ai_review(
             pkg,
             pkg_data[pkg]["pkgbuild"] or "",
@@ -1565,7 +1580,7 @@ def _run_review_and_install(
         )
         pkg_data[pkg]["review"] = review
         log[-1] = ("✓", f"{pkg} — AI security review")
-        draw_progress_log(stdscr, "Fetching Package Data", log, -1)
+        draw_progress_log(stdscr, "Conducting Security Review", log, -1)
 
     # Show complete log
     draw_review_log_viewer(stdscr, log)
