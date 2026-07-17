@@ -353,11 +353,8 @@ def compute_local_risk_score(
         score += 5
         factors.append(("No PGP signature verification", 5))
 
-    # Network download sources
-    urls = metadata.get("download_urls", "")
-    if urls and urls != "N/A":
-        score += 0
-        factors.append((f"Downloads from external hosts: {urls}", 0))
+    # Network download sources — informational only, no score impact
+    # (omitted from factors to avoid cluttering the report)
 
     # Install script (.install file)
     if metadata.get("has_install_script") == "Yes":
