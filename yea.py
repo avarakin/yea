@@ -20,10 +20,12 @@ import select
 import signal
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
@@ -119,7 +121,7 @@ def _fmt_ts(val):
     """Format a Unix timestamp as ISO format, or return 'N/A'."""
     if not val:
         return "N/A"
-    return datetime.utcfromtimestamp(val).isoformat()
+    return datetime.fromtimestamp(val, timezone.utc).isoformat()
 
 
 def _build_metadata(aur_info: dict | None, pkgbuild: str | None, git_meta: dict,
@@ -247,18 +249,31 @@ COMPROMISED_LIST_URL = "https://md.archlinux.org/s/SxbqukK6IA"
 def _fetch_compromised_list() -> set[str]:
     """Fetch the known compromised packages list from the remote URL.
 
+    The remote URL returns an HTML page (HedgeDoc). Strip HTML tags,
+    then extract package names from the markdown code-fence block.
+
     Returns an empty set if the fetch fails.
     """
     try:
         req = urllib.request.Request(COMPROMISED_LIST_URL)
         with urllib.request.urlopen(req, timeout=10) as resp:
-            text = resp.read().decode("utf-8")
-        return {line.strip() for line in text.splitlines() if line.strip()}
+            html = resp.read().decode("utf-8")
+        # Strip HTML tags
+        text = re.sub(r"<[^>]+>", " ", html)
+        # Decode common HTML entities
+        text = text.replace("&thinsp;", " ").replace("&nbsp;", " ")
+        # Extract content between code fences (```)
+        fence_match = re.search(r"```(.*)```", text, re.DOTALL)
+        if not fence_match:
+            return set()
+        raw = fence_match.group(1).strip()
+        # Split on whitespace and filter empty
+        return {name for name in raw.split() if name}
     except Exception:
         return set()
 
 
-KNOWN_COMPROMISED = _fetch_compromised_list()
+KNOWN_COMPROMISED: set[str] = set()
 
 
 def check_vulnerabilities(pkgname: str, aur_info: dict | None = None) -> list[str]:
@@ -411,7 +426,7 @@ def compute_local_risk_score(
     if maint_change and maint_change != "N/A":
         try:
             change_dt = datetime.fromisoformat(maint_change)
-            days_since = (datetime.utcnow() - change_dt).days
+            days_since = (datetime.now(timezone.utc) - change_dt).days
             if days_since > 0:
                 recency_score = 100 / days_since
                 points = int(recency_score)
@@ -1117,6 +1132,122 @@ def screen_package_list(
                 return selected
 
 
+def screen_compromised_check(
+    stdscr,
+    packages: list[str],
+) -> set[str]:
+    """Fetch the compromised packages list with a progress indicator,
+    then show a scrollable list of check results.
+
+    Returns the compromised set (to be assigned to KNOWN_COMPROMISED).
+    """
+    curses.curs_set(0)
+    stdscr.nodelay(False)
+
+    # Phase 1: Download with progress indicator
+    result = [set()]
+    def fetch_thread():
+        result[0] = _fetch_compromised_list()
+    t = threading.Thread(target=fetch_thread, daemon=True)
+    t.start()
+
+    # Draw progress indicator while waiting for the thread
+    stdscr.nodelay(True)
+    while t.is_alive():
+        stdscr.erase()
+        max_y, max_x = stdscr.getmaxyx()
+        draw_header(stdscr, 0, "Compromised Package Check")
+        draw_line(stdscr, 4, 2, "Downloading compromised packages list...")
+        draw_line(stdscr, 5, 2, "This may take a moment.")
+        draw_footer(stdscr, max_y - 2, ["Waiting..."])
+        stdscr.refresh()
+        time.sleep(0.5)
+    stdscr.nodelay(False)
+
+    compromised = result[0]
+
+    # Phase 2: Show results + full compromised list in scrollable view
+    hits = [pkg for pkg in packages if pkg in compromised]
+
+    # Build all scrollable entries
+    all_entries: list[tuple[str, str]] = []
+    for pkg in packages:
+        if pkg in compromised:
+            all_entries.append(("✗", f"{pkg} — found in compromised list"))
+        else:
+            all_entries.append(("✓", f"{pkg} — clean"))
+
+    # Separator + full compromised list
+    sorted_compromised = sorted(compromised)
+    if sorted_compromised:
+        all_entries.append(("", ""))
+        all_entries.append(("", "─── Full Compromised Packages List ───"))
+        all_entries.append(("", f"Total known compromised: {len(sorted_compromised)}"))
+        all_entries.append(("", ""))
+        for pkg in sorted_compromised:
+            marker = "✗" if pkg in packages else " "
+            all_entries.append((marker, pkg))
+
+    scroll_offset = 0
+
+    while True:
+        stdscr.erase()
+        max_y, max_x = stdscr.getmaxyx()
+        end_y = max_y - 2
+
+        draw_header(stdscr, 0, "Compromised Package Check")
+
+        if hits:
+            draw_line(stdscr, 4, 2, f"⚠ {len(hits)} package(s) found in compromised list!")
+        else:
+            draw_line(stdscr, 4, 2, "No packages found in the compromised list.")
+        draw_line(stdscr, 5, 2, f"Total packages checked: {len(packages)}")
+
+        content_start = 7
+        content_end = max_y - 2
+        content_visible = content_end - content_start
+        if content_visible < 1:
+            content_visible = 1
+
+        for i in range(content_visible):
+            entry_idx = scroll_offset + i
+            screen_y = content_start + i
+            if entry_idx < len(all_entries):
+                marker, msg = all_entries[entry_idx]
+                attr = curses.A_NORMAL
+                if marker == "✗":
+                    attr = curses.color_pair(1)
+                elif msg.startswith("───"):
+                    attr = curses.A_BOLD | curses.A_UNDERLINE
+                elif not msg:
+                    attr = curses.A_DIM
+                line = f" {msg}"
+                draw_line(stdscr, screen_y, 0, line, attr)
+            else:
+                draw_line(stdscr, screen_y, 0, "", curses.A_NORMAL)
+
+        draw_footer(
+            stdscr,
+            max_y - 2,
+            [f"{len(all_entries)} entries", "↑/↓: Scroll", "PgUp/PgDn: Page", "Any key: Continue"],
+        )
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key == curses.KEY_UP:
+            scroll_offset = max(0, scroll_offset - 1)
+        elif key == curses.KEY_DOWN:
+            scroll_offset = min(max(0, len(all_entries) - content_visible), scroll_offset + 1)
+        elif key == curses.KEY_PPAGE:
+            scroll_offset = max(0, scroll_offset - content_visible)
+        elif key == curses.KEY_NPAGE:
+            scroll_offset = min(max(0, len(all_entries) - content_visible), scroll_offset + content_visible)
+        else:
+            break
+
+    return compromised
+
+
 def screen_vulnerability_alert(
     stdscr, pkgname: str, vulns: list[str]
 ) -> bool:
@@ -1546,6 +1677,11 @@ def _run_review_and_install(
     pkg_data: dict[str, dict] | None = None,
 ) -> None:
     """Shared flow: vulnerability alerts, AI review, per-package review, confirmation, install."""
+
+    # Fetch the compromised packages list with progress and show results
+    global KNOWN_COMPROMISED
+    KNOWN_COMPROMISED = screen_compromised_check(stdscr, selected)
+
     # Fetch metadata if not pre-fetched
     if pkg_data is None:
         pkg_data = {}
